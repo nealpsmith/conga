@@ -2,18 +2,45 @@ import numpy as np
 import sys
 from os import system
 import os.path
+from pathlib import Path
+import os
 from scipy.sparse import issparse
 from collections import Counter
+import subprocess
+
 # try not to have any conga imports here
 #
 
 # convenience paths
-path_to_conga = os.path.dirname(os.path.realpath(__file__))
-assert not path_to_conga.endswith('/')
-path_to_conga += '/'
+path_to_conga = Path(__file__).parent
+assert os.path.isdir( path_to_conga )
 
-path_to_data = path_to_conga+'data/'
+path_to_data = Path.joinpath( path_to_conga, 'data')
 assert os.path.isdir( path_to_data )
+
+path_to_tcrdist_cpp = Path.joinpath( path_to_conga.parents[0] ,'tcrdist_cpp')
+path_to_tcrdist_cpp_bin = Path.joinpath( path_to_tcrdist_cpp ,'bin')
+path_to_tcrdist_cpp_db = Path.joinpath( path_to_tcrdist_cpp ,'db')
+assert os.path.isdir( path_to_tcrdist_cpp_bin ) and os.path.isdir( path_to_tcrdist_cpp_db )
+
+
+def tcrdist_cpp_available():
+    if os.name == 'posix':
+        return os.path.exists(Path.joinpath( path_to_tcrdist_cpp_bin ,'find_neighbors'))
+    else:
+        return os.path.exists(Path.joinpath( path_to_tcrdist_cpp_bin ,'find_neighbors.exe'))
+
+# this is the (OPTIONAL) obs key used to store a subject-specific identifier
+# right now this is only used to prevent condensing of clonotypes that span subjects,
+# which is pretty unlikely but could happen with certain populations (e.g., MAIT cells)
+#
+SUBJECT_ID_OBS_KEY = 'subject_id'
+
+# not a big deal, but if we have protein ie antibody data we use these to mask it out
+GENE_EXPRESSION_FEATURE_TYPE = 'Gene Expression'
+ANTIBODY_CAPTURE_FEATURE_TYPE = 'Antibody Capture'
+
+EXPECTED_FEATURE_TYPES = [GENE_EXPRESSION_FEATURE_TYPE, ANTIBODY_CAPTURE_FEATURE_TYPE]
 
 FUNNY_MOUSE_TRBV_GENE = '5830405F06Rik' # actually seems to be a tcr v gene transcript or correlate with one
 FUNNY_HUMAN_IG_GENES = ['AC233755.1', 'AC233755.2', # seem to be associated with one or more IGHV genes
@@ -21,9 +48,16 @@ FUNNY_HUMAN_IG_GENES = ['AC233755.1', 'AC233755.2', # seem to be associated with
                         'IGLL5' ] # correlated with IGLJ1
 
 def run_command( cmd, verbose=False ):
+
     if verbose:
         print('util.run_command: cmd=', cmd)
-    system(cmd)
+
+    if os.name == 'posix':
+        system(cmd)
+    else:
+        cmd_run = 'cmd /c' + cmd
+        subprocess.check_call(list(cmd_run.split(' ')))
+
 
 # different types of repertoire data we might have
 TCR_AB_VDJ_TYPE = 'TCR_AB_VDJ_TYPE'
@@ -33,7 +67,7 @@ IG_VDJ_TYPE = 'IG_VDJ_TYPE'
 organism2vdj_type = {
     'human':TCR_AB_VDJ_TYPE,
     'mouse':TCR_AB_VDJ_TYPE,
-    'human_gd':TCR_AB_VDJ_TYPE,
+    'human_gd':TCR_GD_VDJ_TYPE,
     'mouse_gd':TCR_GD_VDJ_TYPE,
     'human_ig':IG_VDJ_TYPE,
     'mouse_ig':IG_VDJ_TYPE,
@@ -97,4 +131,20 @@ def make_clones_file( tcrs, outfilename, subject = 'UNK', epitope = 'UNK_E' ):
         out.write('\t'.join( outl[x] for x in outfields)+'\n')
     out.close()
 
+
+def get_feature_types_varname( adata ):
+    ''' Figure out the correct "feature_types" varname, e.g. feature_types-0 or feature_types-0-0
+    for sorting out which are gene expression features and which are protein/antibody-capture features
+    '''
+    for name in adata.var: # the columns of the var dataframe
+        if name.startswith('feature_types'):
+            ftypes = Counter(adata.var[name])
+            print('get_feature_types_varname:', name, 'feature_type_counts:', ftypes.most_common())
+            for fname, count in ftypes.items():
+                if fname not in EXPECTED_FEATURE_TYPES:
+                    print('WARNING WARNING WARNING !!!! unrecognized feature type', fname, 'with', count, 'features')
+            return name
+    print('unable to find feature_types varname')
+    print(adata.var_names)
+    return None
 

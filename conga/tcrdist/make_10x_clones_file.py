@@ -5,6 +5,7 @@ from collections import Counter
 from itertools import chain
 import sys
 import pandas as pd
+from ..util import organism2vdj_type, IG_VDJ_TYPE
 
 MIN_CDR3_LEN = 6 # otherwise tcrdist barfs; actually we could also set this to 5 and be OK
 
@@ -72,7 +73,8 @@ def read_tcr_data(
         contig_annotations_csvfile,
         consensus_annotations_csvfile,
         allow_unknown_genes = False,
-        verbose = False
+        verbose = False,
+        prefix_clone_ids_with_tcr_type = False,
 ):
     """ Parse tcr data, only taking 'productive' tcrs
 
@@ -89,6 +91,14 @@ def read_tcr_data(
     gene_suffix = '*01' # may not be used
 
 
+    if prefix_clone_ids_with_tcr_type:
+        if organism2vdj_type[organism] == IG_VDJ_TYPE:
+            clone_id_prefix = 'bcr_'
+        else:
+            clone_id_prefix = 'tcr_'
+    else:
+        clone_id_prefix = ''
+
     # read the contig annotations-- map from clonotypes to barcodes
     # barcode,is_cell,contig_id,high_confidence,length,chain,v_gene,d_gene,j_gene,c_gene,full_length,productive,cdr3,cdr3_nt,reads,umis,raw_clonotype_id,raw_consensus_id
     # AAAGATGGTCTTCTCG-1,True,AAAGATGGTCTTCTCG-1_contig_1,True,695,TRB,TRBV5-1*01,TRBD2*02,TRBJ2-3*01,TRBC2*01,True,True,CASSPLAGYAADTQYF,TGCGCCAGCAGCCCCCTAGCGGGATACGCAGCAGATACGCAGTATTTT,9427,9,clonotype14,clonotype14_consensus_1
@@ -101,7 +111,7 @@ def read_tcr_data(
     clonotype2tcrs_backup = {} ## in case we dont have a consensus_annotations_csvfile
     for l in df.itertuples():
         bc = l.barcode
-        clonotype = l.raw_clonotype_id
+        clonotype = clone_id_prefix + l.raw_clonotype_id
         # annoying: pandas sometimes converts to True/False booleans and sometimes not.
         assert l.productive in [ 'None', 'False', 'True']
         if clonotype =='None':
@@ -232,7 +242,8 @@ def read_tcr_data_batch(
         organism,
         metadata_file,
         allow_unknown_genes = False,
-        verbose = False
+        verbose = False,
+        prefix_clone_ids_with_tcr_type = False,
 ):
     """ Parse tcr data, only taking 'productive' tcrs
 
@@ -244,6 +255,14 @@ def read_tcr_data_batch(
     assert exists( metadata_file )
 
     md = pd.read_csv(metadata_file, dtype=str)#"string")
+
+    if prefix_clone_ids_with_tcr_type:
+        if organism2vdj_type[organism] == IG_VDJ_TYPE:
+            clone_id_prefix = 'bcr_'
+        else:
+            clone_id_prefix = 'tcr_'
+    else:
+        clone_id_prefix = ''
 
     # read in contig files and update suffix to match GEX matrix
     contig_list = []
@@ -260,8 +279,8 @@ def read_tcr_data_batch(
             '_' + dfx['contig_id'].str.split('_').str.get(2) # currently unused, but can't hurt
 
         # giving each library a tag here really boosted the number of clones I got back
-        dfx['raw_clonotype_id'] = dfx['raw_clonotype_id'] + '_' + suffix
-        dfx['raw_consensus_id'] = dfx['raw_consensus_id'] + '_' + suffix # currently unused, but can't hurt
+        dfx['raw_clonotype_id'] = clone_id_prefix + dfx['raw_clonotype_id'] + '_' + suffix
+        dfx['raw_consensus_id'] = clone_id_prefix + dfx['raw_consensus_id'] + '_' + suffix # currently unused, can't hurt
 
         contig_list.append(dfx)
 
@@ -355,9 +374,9 @@ def _make_clones_file( organism, outfile, clonotype2tcrs, clonotype2barcodes, ve
     outmap = open(bc_mapfile,'w')
     outmap.write('clone_id\tbarcodes\n')
 
-    outfields = 'clone_id subject clone_size va_gene ja_gene vb_gene jb_gene cdr3a cdr3a_nucseq cdr3b cdr3b_nucseq'\
+    outfields = 'clone_id subject clone_size va_gene ja_gene va2_gene ja2_gene vb_gene jb_gene cdr3a cdr3a_nucseq cdr3a2 cdr3a2_nucseq cdr3b cdr3b_nucseq'\
         .split()
-    extra_fields = 'alpha_umi beta_umi num_alphas num_betas'.split()
+    extra_fields = 'alpha_umi alpha2_umi beta_umi num_alphas num_betas'.split()
     outfields += extra_fields
 
     # we used to make a temporary file and then run tcr-dist/file_converter.py on it
@@ -371,8 +390,12 @@ def _make_clones_file( organism, outfile, clonotype2tcrs, clonotype2barcodes, ve
         if len(tcrs['A']) >= 1 and len(tcrs['B']) >= 1:
             atcrs = tcrs['A'].most_common()
             btcrs = tcrs['B'].most_common()
-            if len(atcrs)>1 and verbose:
-                print('multiple alphas, picking top umi:',' '.join( str(x) for _,x in atcrs ))
+            if len(atcrs)>1:
+                if verbose:
+                    print('multiple alphas, picking top umi:',' '.join( str(x) for _,x in atcrs ))
+                atcr2, atcr2_umi = atcrs[1]
+            else:
+                atcr2, atcr2_umi = ('', '', '', ''), 0
             if len(btcrs)>1 and verbose:
                 print('multiple  betas, picking top umi:',' '.join( str(x) for _,x in btcrs ))
             atcr, atcr_umi = atcrs[0]
@@ -386,6 +409,11 @@ def _make_clones_file( organism, outfile, clonotype2tcrs, clonotype2barcodes, ve
             outl['cdr3a']        = atcr[2]
             outl['cdr3a_nucseq'] = atcr[3]
             outl['alpha_umi']    = str(atcr_umi)
+            outl['va2_gene']      = atcr2[0]
+            outl['ja2_gene']      = atcr2[1]
+            outl['cdr3a2']        = atcr2[2]
+            outl['cdr3a2_nucseq'] = atcr2[3]
+            outl['alpha2_umi']    = str(atcr2_umi)
             outl['num_alphas']   = str(len(atcrs))
             outl['vb_gene']      = btcr[0]
             outl['jb_gene']      = btcr[1]
@@ -417,12 +445,13 @@ def setup_filtered_clonotype_dicts(
 
     # get count of how many cells support each pairing
     #
-    pairing_counts = Counter()
+    pairing_counts, pairing_counts_by_umi = Counter(), Counter()
     for cid, tcrs in clonotype2tcrs.items():
         size = len(clonotype2barcodes[cid])
-        for t1 in tcrs['A']:
-            for t2 in tcrs['B']:
+        for t1, umi1 in tcrs['A'].items():
+            for t2, umi2 in tcrs['B'].items():
                 pairing_counts[ (t1,t2) ] += size
+                pairing_counts_by_umi[ (t1,t2) ] += min(umi1, umi2)
 
     # this is no longer going to be a bijection!
     chain_partner = {}
@@ -543,6 +572,13 @@ def setup_filtered_clonotype_dicts(
             for pt2 in pairs_tuple2clonotypes:
                 if len(pt2) == 2 and pt2[0] == pt1[0]:
                     overlaps.append( pt2 )
+                elif len(pt2) == 2 and pt2[1] == pt1[0]:
+                    # this 'elif' was added 2020-12-12; before that we were missing some
+                    # overlaps...
+                    # print('MISSED OVERLAP:', pairing_counts[pt2[0]], pairing_counts[pt2[1]],
+                    #       pairing_counts_by_umi[pt2[0]], pairing_counts_by_umi[pt2[1]],
+                    #       show(pt1), show(pt2))
+                    overlaps.append( pt2 )
             if len(overlaps)>1:
                 if verbose:
                     print('badoverlaps:', len(overlaps), show(pt1), show(overlaps))
@@ -551,6 +587,7 @@ def setup_filtered_clonotype_dicts(
                 merge_into_pairs.append( (pt1,pt2) )
 
     for pt1, pt2 in merge_into_pairs:
+        assert len(pt1) == 1 and len(pt2) == 2
         #print('mergeinto:', show(pt1), show(pt2))
         pairs_tuple2clonotypes[pt2].extend( pairs_tuple2clonotypes[pt1] )
         del pairs_tuple2clonotypes[pt1]

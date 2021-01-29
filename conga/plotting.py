@@ -1,14 +1,18 @@
-#import matplotlib
+########################################################################################################################
+import matplotlib
 #matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
+import scanpy as sc
 import sys
 from sys import exit
 import pandas as pd
 import math
-from . import preprocess as pp
+from sklearn.decomposition import PCA
 from . import svg_basic
 from . import util
+from . import preprocess
+from . import pmhc_scoring
 from . import correlations
 from . import tcr_scoring
 from .tcrdist.make_tcr_logo import make_tcr_logo_for_tcrs
@@ -42,9 +46,9 @@ default_logo_genes = {
                  'Itgal', 'Prf1', 'Gzma', 'Il2rb', 'Gzmk', 'Ifng',
                  'Ccl5', 'Cxcr3', 'Zbtb16', 'Nkg7', 'Klrd1'],
     # b cells
-    'human_ig': ['IL4R','TCL1A','SELL','IGKC','CD27',
-                 'LAIR1','HLA-C','HLA-DRB1','COTL1','JCHAIN','XBP1',
-                 'EGR1','IGHM','IGHD','IGHA1','IGHA2']
+    'human_ig': ['IL4R','TCL1A','SELL','CRIP1','CD27',
+                 'ZFP36','HLA-C','HLA-DRB1','COTL1','JCHAIN','XBP1',
+                 'IGHD','IGHM','IGHG1','IGHA1','IGHA2']
 }
 
 
@@ -173,6 +177,7 @@ def _parse_bicluster_rank_genes( adata, uns_tag = 'rank_genes_good_biclusters' )
     '''
 
     names = pd.DataFrame(adata.uns[uns_tag]['names'])
+    organism = adata.uns['organism']
 
     all_ranks = {}
     for clptag in names.columns:
@@ -181,6 +186,8 @@ def _parse_bicluster_rank_genes( adata, uns_tag = 'rank_genes_good_biclusters' )
         ranks = []
         for igene, gene in enumerate( adata.uns[uns_tag]['names'][clptag] ):
             if pd.isnull(gene):
+                continue
+            if util.is_vdj_gene(gene, organism, include_constant_regions=True): # NEWNEWNEW
                 continue
             log2fold = adata.uns[uns_tag]['logfoldchanges'][clptag][igene]
             pval_adj = adata.uns[uns_tag]['pvals_adj'][clptag][igene]
@@ -230,6 +237,13 @@ def make_logo_plots(
         nocleanup = False, # dont delete temporary image files (useful for debugging)
         conga_scores = None,
         good_score_mask = None,
+        make_batch_bars = None,
+        batch_keys = None,
+        make_cluster_gex_logos = True,
+        draw_edges_between_conga_hits = True,
+        add_conga_scores_colorbar = False,
+        add_gex_logos_colorbar = False,
+        spacey = False, # add extra space to make everything harder to read
 
         ## controls for the gene expression thumbnails that come before the actual logos:
         gex_header_genes=None,
@@ -257,6 +271,12 @@ def make_logo_plots(
 
     if not make_gex_header:
         make_gex_header_raw, make_gex_header_nbrZ = False, False
+
+    # show the distribution of the clones among the different batches
+    if make_batch_bars is None:
+        make_batch_bars = 'batch_keys' in adata.uns_keys()
+    if make_batch_bars and batch_keys is None:
+        batch_keys = adata.uns['batch_keys']
 
     ## unpack data from adata arrays ##################################
     clone_sizes = adata.obs['clone_sizes']
@@ -292,7 +312,7 @@ def make_logo_plots(
         X_pmhc = adata.obsm['X_pmhc']
         assert X_pmhc.shape == ( adata.shape[0], len(pmhc_var_names))
 
-    tcrs = pp.retrieve_tcrs_from_adata(adata)
+    tcrs = preprocess.retrieve_tcrs_from_adata(adata)
     ################################################################# no more unpacking below here...
 
     num_clones = adata.shape[0]
@@ -415,25 +435,30 @@ def make_logo_plots(
 
     # aim for 10in width
     dendro_width = 1.0
+    single_batch_bar_width = 0.25
+    batch_bars_width = 0 if not make_batch_bars else single_batch_bar_width * len(batch_keys)
     title_logo_width = 0.75
     rg_logo_width = 1.5
     score_logo_width = 0.0 if good_bicluster_tcr_scores is None else 0.5
     tcr_logo_width = 8
-    gex_logo_width = 2
     logo_height = 0.5
     frac_scale = 130
     margin = 0.2 # left and right margins actually
     top_margin = 0.2
     bottom_margin = 1.3*margin
+    yspacer_above_logos = 0.1
+    yspacer_below_header = 0.15 if spacey else 0.0
+    xspacer_within_header = 0.15 if spacey else 0.0
 
-    gex_logo_width = logo_height * ( gene_width / (math.sqrt(3)+1) )
+    gex_logo_width = logo_height * ( gene_width / (math.sqrt(3)+1) ) if make_cluster_gex_logos else 0.0
 
-    fig_width = 2*margin + dendro_width + title_logo_width + rg_logo_width + tcr_logo_width + score_logo_width + \
-                gex_logo_width
-    header_height = (fig_width-2*margin)/6.
+    fig_width = ( 2*margin + dendro_width + title_logo_width + batch_bars_width + rg_logo_width + tcr_logo_width +
+                  score_logo_width + gex_logo_width )
+    conga_scores_colorbar_width = 0.035*fig_width if add_conga_scores_colorbar else 0.0
+    header_height = (fig_width-conga_scores_colorbar_width-xspacer_within_header-2*margin)/6.
 
     num_header2_rows = int(make_gex_header_nbrZ)+int(make_gex_header_raw)
-    gex_logo_key_width = 2 # in header2 cols
+    gex_logo_key_width = 2 if make_cluster_gex_logos else 0 # in header2 cols
 
     if make_gex_header:
         num_header2_tcr_score_cols = max(gex_logo_key_width,
@@ -444,7 +469,8 @@ def make_logo_plots(
 
     else:
         header2_height = 0.
-    fig_height = top_margin + bottom_margin + header_height + num_header2_rows * header2_height + len(clps)*logo_height
+    fig_height = ( top_margin + bottom_margin + header_height + num_header2_rows * header2_height +
+                   yspacer_below_header + (len(clps)>0)*yspacer_above_logos + len(clps)*logo_height )
 
     # frac_scale is in units of pts^2, and sqrt(frac_scale) is the MAX width in points of the marker
     # there are 72 points per inch
@@ -488,9 +514,9 @@ def make_logo_plots(
     # make a header: 6 square scatter plots across the top
     # left to right:
     # 1 GEX UMAP, colored by GEX clusters
-    # 2 TCR UMAP, colored by TCR clusters
-    # 3 GEX UMAP, colored by conga score
-    # 4 GEX UMAP, only good cells, colored by cluster-pairs
+    # 2 GEX UMAP, colored by conga score
+    # 3 GEX UMAP, only good cells, colored by cluster-pairs
+    # 4 TCR UMAP, colored by TCR clusters
     # 5 TCR UMAP, colored by conga score
     # 6 TCR UMAP, only good cells, colored by cluster-pairs
 
@@ -507,7 +533,7 @@ def make_logo_plots(
             cluster_names = clusters_tcr_names
         bottom = (fig_height-top_margin-header_height)/fig_height
         height = header_height/fig_height
-        left = (margin+3*icol*header_height)/fig_width # make these plots square, so height=width
+        left = (margin+3*icol*header_height+icol*xspacer_within_header)/fig_width # make these plots squares
         width = header_height/fig_width
         plt.axes( [left,bottom,width,height] )
         num_clusters = np.max(clusters)+1
@@ -519,9 +545,15 @@ def make_logo_plots(
         plt.xticks([],[])
         plt.yticks([],[])
         clusters_tag = proj_tag if not ignore_tcr_cluster_colors else 'combo'
-        plt.title('{} clusters ({}2D)'.format(clusters_tag, proj_tag), fontsize=9, pad=1) #pad=8)
+        if spacey:
+            plt.title('{} clusters'.format(clusters_tag), fontsize=9, pad=1) #pad=8)
+            plt.xlabel(f'{proj_tag} UMAP1', fontsize=7, labelpad=1)
+            plt.ylabel(f'{proj_tag} UMAP2', fontsize=7, labelpad=0.0)
+        else:
+            plt.title('{} clusters ({}2D)'.format(clusters_tag, proj_tag), fontsize=9, pad=1) #pad=8)
+
         if icol==0:
-            plt.text(0.01,0.01,'{} clones'.format(len(all_xy)), ha='left', va='bottom', fontsize=8,
+            plt.text(0.01,0.01,'{} clonotypes'.format(len(all_xy)), ha='left', va='bottom', fontsize=8,
                      transform=plt.gca().transAxes)
             plt.text(0.99,0.01,'{} cells'.format(sum(clone_sizes)), ha='right', va='bottom', fontsize=8,
                      transform=plt.gca().transAxes)
@@ -538,7 +570,7 @@ def make_logo_plots(
         ## now a plot colored by conga score
         bottom = (fig_height-top_margin-header_height)/fig_height
         height = header_height/fig_height
-        left = (margin+(3*icol+1)*header_height)/fig_width # make these plots square, so height=width
+        left = (margin+(3*icol+1)*header_height+icol*xspacer_within_header)/fig_width # make these plots square
         width = header_height/fig_width
         plt.axes( [left,bottom,width,height] )
 
@@ -555,11 +587,16 @@ def make_logo_plots(
         #plt.xlabel('{} UMAP1'.format(TAG))
         #plt.ylabel('{} UMAP2'.format(TAG), fontsize=12,labelpad=1)
         #plt.title('kNN-overlap E-values (Eval=Pval*num_clones)')
-        #cbar = plt.colorbar(ticks=[ math.sqrt(-1*math.log10(x)) for x in [1.0,1e-1,1e-2,1e-3,1e-4,1e-5] ])
-        #cbar.ax.set_yticklabels(['1','0.1','0.01','0.001','1e-4','1e-5'])
+        # if add_conga_scores_colorbar:
+        #     cbar = plt.colorbar(ticks=[ math.sqrt(-1*math.log10(x)) for x in [1.0,1e-1,1e-2,1e-3,1e-4,1e-5] ])
+        #     cbar.ax.set_yticklabels(['1','0.1','0.01','0.001','1e-4','1e-5'])
         xmin,xmax = plt.xlim()
         ymin,ymax = plt.ylim()
-        plt.title('CoNGA scores ({}2D)'.format(proj_tag),fontsize=9,pad=1)
+        if spacey:
+            plt.title('CoNGA scores',fontsize=9,pad=1)
+            plt.xlabel(f'{proj_tag} UMAP1', fontsize=7, labelpad=1)
+        else:
+            plt.title('CoNGA scores ({}2D)'.format(proj_tag),fontsize=9,pad=1)
         #plt.title('kNN overlap E-values {}-UMAP'.format('GEX' if icol==0 else 'TCR'),fontsize=12,pad=1)
 
 
@@ -567,7 +604,7 @@ def make_logo_plots(
         ## now just showing the top scoring clones
         bottom = (fig_height-top_margin-header_height)/fig_height
         height = header_height/fig_height
-        left = (margin+(3*icol+2)*header_height)/fig_width # make these plots square, so height=width
+        left = (margin+(3*icol+2)*header_height+icol*xspacer_within_header)/fig_width # make these plots square
         width = header_height/fig_width
         plt.axes( [left,bottom,width,height] )
 
@@ -585,33 +622,83 @@ def make_logo_plots(
                     else:
                         inter_lines.append( [ [ all_xy[ii][0], all_xy[ii][1]], [ all_xy[jj][0], all_xy[jj][1] ] ] )
 
-        # the inter-cluspair lines
-        light_gray = '#D3D3D3'
-        line_segments = LineCollection( inter_lines, linewidths=0.25, zorder=1, colors=light_gray, alpha=0.25)
-        plt.gca().add_collection(line_segments)
+        if draw_edges_between_conga_hits:
+            # the inter-cluspair lines
+            light_gray = '#D3D3D3'
+            line_segments = LineCollection( inter_lines, linewidths=0.25, zorder=1, colors=light_gray, alpha=0.25)
+            plt.gca().add_collection(line_segments)
 
-        # the intra-cluspair lines
-        dark_gray = '#888888'
-        line_segments = LineCollection( intra_lines, linewidths=0.25, zorder=1, colors='k')#dark_gray, alpha=0.5)
-        plt.gca().add_collection(line_segments)
+            # the intra-cluspair lines
+            dark_gray = '#888888'
+            line_segments = LineCollection( intra_lines, linewidths=0.25, zorder=1, colors='k')#dark_gray, alpha=0.5)
+            plt.gca().add_collection(line_segments)
 
 
-        for clp,nodes in cluspair2nodes.items():
-            xvals = [ all_xy[x][0] for x in nodes ]
-            yvals = [ all_xy[x][1] for x in nodes ]
+        for clp, nodes in cluspair2nodes.items():
+            xvals = np.array([ all_xy[x][0] for x in nodes ])
+            yvals = np.array([ all_xy[x][1] for x in nodes ])
+            cscores = np.array([ conga_scores[x] for x in nodes ])
+
             if ignore_tcr_cluster_colors:
-                plt.plot( xvals, yvals, zorder=2, marker='o', linestyle='None',
-                          color=gex_colors[clp[0]], markeredgecolor='none', markeredgewidth=0 )
+                plt.plot( xvals, yvals,
+                          zorder=2,
+                          marker='o',
+                          linestyle='None',
+                          color=gex_colors[clp[0]],
+                          markeredgecolor='none',
+                          markeredgewidth=0 )
             else:
-                plt.plot( xvals, yvals, zorder=2, marker='o', linestyle='None',
-                          color=gex_colors[clp[0]], markerfacecoloralt=tcr_colors[clp[1]],
-                          fillstyle='left', markeredgecolor='none', markeredgewidth=0 )
+                for score_threshold, markersize in [[1., 6],
+                                                    [1e-1, 7],
+                                                    [1e-2, 8]]:
+                    mask = cscores <= score_threshold
+                    if np.sum(mask)==0:
+                        continue # nothing to plot
+                    # most significant last:
+                    reorder = np.argsort(cscores[mask])[::-1]
+                    plt.plot(xvals[mask][reorder], yvals[mask][reorder],
+                             zorder=2,
+                             marker='o',
+                             linestyle='None',
+                             markersize=markersize,
+                             color=gex_colors[clp[0]],
+                             markerfacecoloralt=tcr_colors[clp[1]],
+                             fillstyle='left',
+                             markeredgecolor='none',
+                             markeredgewidth=0 )
         plt.xticks([],[])
         plt.yticks([],[])
         #plt.ylabel('{} UMAP2'.format(TAG), fontsize=12,labelpad=1)
         plt.xlim((xmin,xmax))
         plt.ylim((ymin,ymax))
-        plt.title('Top-scoring clones ({}2D)'.format(proj_tag),fontsize=9,pad=1)
+        if spacey:
+            plt.title('CoNGA hits', fontsize=9, pad=1) #pad=8)
+            plt.xlabel(f'{proj_tag} UMAP1', fontsize=7, labelpad=1)
+        else:
+            plt.title('CoNGA hits ({}2D)'.format(proj_tag),fontsize=9,pad=1)
+
+        if add_conga_scores_colorbar and icol==1:
+            ax_width = conga_scores_colorbar_width/8.
+            ax_height = 0.72*header_height
+            bottom = (fig_height-top_margin-header_height+0.08*header_height)/fig_height
+            height = ax_height/fig_height
+            left = (margin+6*header_height+xspacer_within_header+0.5*ax_width)/fig_width
+            width = ax_width/fig_width
+            plt.axes( [left,bottom,width,height] )
+            sm = matplotlib.cm.ScalarMappable(
+                norm=matplotlib.colors.Normalize(vmin=vmin, vmax=vmax), cmap='viridis')
+            sm.set_array(np.sqrt( np.array( [ max(0, -1*np.log10(conga_scores[x])) for x in ks ] )))
+
+            #plt.scatter([],[],c=[],cmap='viridis', vmin=vmin, vmax=vmax)
+            #plt.gca().set_visible(False)
+            cbar = plt.colorbar(mappable=sm, cax=plt.gca(),
+                                ticks=[ math.sqrt(-1*math.log10(x)) for x in [1.0,1e-1,1e-2,1e-3,1e-4,1e-5] ])
+            # cbar = plt.colorbar(
+            #     cax=plt.gca(), ticks=[ math.sqrt(-1*math.log10(x)) for x in [1.0,1e-1,1e-2,1e-3,1e-4,1e-5] ])
+            cbar.ax.set_yticklabels(['1','0.1','0.01','0.001','1e-4','1e-5'], fontsize=7)
+            #cbar.ax.set_ylabel('CoNGA score')
+            cbar.ax.set_title('CoNGA\nscore', loc='left', ha='left', fontsize=9)
+
 
 
         # for making the dendrogram
@@ -647,7 +734,7 @@ def make_logo_plots(
             index = X_igex_genes.index(gene)
 
             if make_gex_header_raw:
-                bottom = (fig_height-top_margin-header_height-header2_height)/fig_height
+                bottom = (fig_height-top_margin-header_height-header2_height-yspacer_below_header)/fig_height
                 height = header2_height/fig_height
                 left = (margin+ig*header2_height)/fig_width # make these plots square, so height=width
                 width = header2_height/fig_width
@@ -668,10 +755,13 @@ def make_logo_plots(
                         plt.xlabel('GEX UMAP1', fontsize=6, labelpad=1)
                 if make_gex_header_nbrZ:
                     plt.text( xmn+pad, ymx, 'raw', va='top', ha='left', fontsize=8)
-                plt.text( xmx, ymx, gene, va='top', ha='right', fontsize=8)
+                    gene_text = gene # no space for both 'clonotype_size' and 'raw'
+                else:
+                    gene_text = gene.replace('clone_sizes', 'clonotype_size')
+                plt.text( xmx, ymx, gene_text, va='top', ha='right', fontsize=8)
 
             if make_gex_header_nbrZ: ## make another plot with the gex-nbrhood averaged scores
-                bottom = (fig_height-top_margin-header_height-num_header2_rows*header2_height)/fig_height
+                bottom = (fig_height-top_margin-header_height-num_header2_rows*header2_height-yspacer_below_header)/fig_height
                 height = header2_height/fig_height
                 left = (margin+ig*header2_height)/fig_width # make these plots square, so height=width
                 width = header2_height/fig_width
@@ -702,7 +792,7 @@ def make_logo_plots(
                 irow=ii//num_header2_tcr_score_cols
                 icol=ii%num_header2_tcr_score_cols
                 ## make another plot with the gex-nbrhood averaged TCR scores
-                bottom = (fig_height-top_margin-header_height-(irow+1)*header2_height)/fig_height
+                bottom = (fig_height-top_margin-header_height-(irow+1)*header2_height-yspacer_below_header)/fig_height
                 height = header2_height/fig_height
                 left = (fig_width-margin-(num_header2_tcr_score_cols-icol)*header2_height)/fig_width
                 width = header2_height/fig_width
@@ -723,17 +813,18 @@ def make_logo_plots(
                 _,ymx = plt.ylim()
                 pad = 0.02*(xmx-xmn)
                 plt.text( xmx-pad, ymx,
-                          scoretag.replace('alphadist','ad').replace('nndists_tcr','NNd').replace('cdr3len','len'),
+                          scoretag.replace('alphadist','alphaD').replace('nndists_tcr','NNd').replace('cdr3len','len'),
                           va='top', ha='right', fontsize=8)
                 plt.text( xmn+pad, ymx, 'tcr', va='top', ha='left', fontsize=8)
 
 
 
-    if len(clps)>0: ## make a key for the gex logo
-        bottom = (fig_height-top_margin-header_height-num_header2_rows*header2_height)/fig_height
-        height = header2_height/fig_height
+    if header2_height > 0.001 and len(clps)>0 and make_cluster_gex_logos: ## make a key for the gex logo
+        downscale = 0.84 if add_gex_logos_colorbar else 1.0
+        bottom = (fig_height-top_margin-header_height-num_header2_rows*header2_height-yspacer_below_header)/fig_height
+        height = downscale * header2_height/fig_height
         left = (fig_width-margin-2*header2_height)/fig_width # make these plots square, so height=width
-        width = 2*header2_height/fig_width
+        width = downscale * 2*header2_height/fig_width
         plt.axes( [left,bottom,width,height] )
         yshift = math.sqrt(3)/2 # 30 60 90 triangle
         xy = []
@@ -745,14 +836,36 @@ def make_logo_plots(
                 xy.append( [xoff+ii, yoff] )
         xy = np.array(xy)
         color = plt.get_cmap('Reds')(0.2)
-        plt.scatter(xy[:,0], xy[:,1], c=[color], s=350, zorder=1)
+        plt.scatter(xy[:,0], xy[:,1], c=[color], s=310*downscale, zorder=1) # was 350
         for gene,(x,y) in zip( logo_genes, xy ):
-            plt.text(x,y,gene,fontsize=8,ha='center',va='center',rotation=30, zorder=2)
+            plt.text(x,y,gene,fontsize=7,ha='center',va='center',rotation=30, zorder=2) # was 8
         plt.xlim( [-0.5, gene_width-0.5] )
         plt.ylim( [-yshift-0.5, yshift+0.5 ] )
         plt.xticks([],[])
         plt.yticks([],[])
-        #plt.title('key for GEX logo',fontsize=8,va='top',pad=1)
+        if add_gex_logos_colorbar:
+            plt.title('GEX logo genes', fontsize=8, va='bottom', pad=1)
+
+            ax_width = 0.06*width
+            ax_height = 0.75*height
+            ax_bottom = bottom + 0.05*height
+            #bottom = (fig_height-top_margin-header_height+0.08*header_height)/fig_height
+            #height = ax_height/fig_height
+            ax_left = left+width+0.05*width
+            plt.axes( [ax_left,bottom,ax_width,ax_height] )
+            sm = matplotlib.cm.ScalarMappable(
+                norm=matplotlib.colors.Normalize(vmin=0, vmax=1), cmap='Reds')
+            sm.set_array(np.linspace(vmin, vmax, 10))
+
+            #plt.scatter([],[],c=[],cmap='viridis', vmin=vmin, vmax=vmax)
+            #plt.gca().set_visible(False)
+            cbar = plt.colorbar(mappable=sm, cax=plt.gca(), ticks = [0,1])
+            #ticks=[ math.sqrt(-1*math.log10(x)) for x in [1.0,1e-1,1e-2,1e-3,1e-4,1e-5] ])
+            # cbar = plt.colorbar(
+            #     cax=plt.gca(), ticks=[ math.sqrt(-1*math.log10(x)) for x in [1.0,1e-1,1e-2,1e-3,1e-4,1e-5] ])
+            cbar.ax.set_yticklabels(['0', 'max'], fontsize=7)
+            #cbar.ax.set_ylabel('CoNGA score')
+            cbar.ax.set_title('Mean\nexpn', loc='left', ha='left', fontsize=8)
 
 
     if len(clps)>1:
@@ -817,7 +930,8 @@ def make_logo_plots(
         last_row = ( irow == len(leaves)-1 )
         print('clp:',irow,len(leaves),logo_pngfile)
         clp = clps[iclp]
-        bottom = (fig_height-top_margin-header_height-num_header2_rows*header2_height-(irow+1)*logo_height)/fig_height
+        bottom = (fig_height-top_margin-header_height-num_header2_rows*header2_height
+                  -yspacer_below_header-yspacer_above_logos - (irow+1)*logo_height)/fig_height
         height = logo_height/fig_height
 
         num_nodes, fracs, means = all_scores[clp]
@@ -860,8 +974,8 @@ def make_logo_plots(
         plt.text(-1,1,'{}'.format(num_nodes),va='top',ha='left',fontsize=8)
         plt.text( 1,1,'{}'.format(num_cells),va='top',ha='right',fontsize=8)
         if first_row:
-            plt.text(-0.1, 1, 'clones', va='top', ha='right', fontsize=6)
-            plt.text( 0.1, 1, 'cells:', va='top', ha='left', fontsize=6)
+            plt.text( 0.0, 1, 'clonotypes', va='bottom', ha='right', fontsize=6)
+            plt.text( 1.0, 1, 'cells', va='bottom', ha='right', fontsize=6)
 
         if show_pmhc_info_in_logos:
             X_pmhc_clp = np.sum(X_pmhc[nodes,:],axis=0)/len(nodes)
@@ -877,13 +991,44 @@ def make_logo_plots(
         plt.ylim((-1,1))
         plt.axis('off')
 
+        # show the batch distribution
+        if make_batch_bars:
+            for ib, k in enumerate(batch_keys):
+                batch_counts_for_clp = np.array(adata.obsm[k])[nodes,:]
+                left = (margin+dendro_width+title_logo_width+ib*single_batch_bar_width)/fig_width
+                width = single_batch_bar_width/fig_width
+                plt.axes( [left,bottom,width,height] )
+                # bar plot
+                counts = np.sum(batch_counts_for_clp, axis=0)
+                num_batch_key_choices = counts.shape[0]
+                assert num_batch_key_choices >1 # we add a fake one in preprocess.py if necessary
+                fractions = counts.astype(float)/np.sum(counts)
+                if num_batch_key_choices <= 10:
+                    colors = plt.get_cmap('tab10').colors[:num_batch_key_choices]
+                elif num_batch_key_choices <= 20:
+                    colors = plt.get_cmap('tab20').colors[:num_batch_key_choices]
+                else:
+                    cmap = plt.get_cmap('tab20')
+                    colors = [cmap(0.99*x/(num_batch_key_choices-1)) for x in range(num_batch_key_choices)]
+                plt.bar([0]*num_batch_key_choices, height=fractions, width=0.8,
+                        bottom=np.cumsum(fractions)-fractions, color=colors, align='center')
+                # overall counts/fractions
+                batch_counts_for_clp = np.array(adata.obsm[k])[:,:]
+                counts = np.sum(batch_counts_for_clp, axis=0)
+                fractions = counts.astype(float)/np.sum(counts)
+                plt.bar([0.6]*num_batch_key_choices, height=fractions, width=0.4,
+                        bottom=np.cumsum(fractions)-fractions, color=colors, align='center')
+                plt.axis('off')
+                plt.ylim((0,1.05))
+
+
         # make the rank genes logo
         if all_ranks is not None:
             clp_rank_genes = all_ranks[clp]
             for r in range(3):
                 pngfile = '{}.tmp_{}_{}_{}.png'.format(logo_pngfile, clp[0], clp[1], r)
                 start_rank, stop_rank = 3*r, 3*r+3
-                left = (margin+dendro_width+title_logo_width+r*0.333*rg_logo_width)/fig_width
+                left = (margin+dendro_width+title_logo_width+batch_bars_width+r*0.333*rg_logo_width)/fig_width
                 width = 0.333*rg_logo_width/fig_width
                 plt.axes( [left,bottom,width,height] )
                 if len(clp_rank_genes) > start_rank and clp_rank_genes[start_rank][2] < 0.99:
@@ -911,7 +1056,7 @@ def make_logo_plots(
 
         # make a tcr logo
         for iab,ab in enumerate('AB'):
-            left = (margin+dendro_width+title_logo_width+rg_logo_width+iab*0.5*tcr_logo_width)/fig_width
+            left = (margin+dendro_width+title_logo_width+batch_bars_width+rg_logo_width+iab*0.5*tcr_logo_width)/fig_width
             width = 0.5*tcr_logo_width/fig_width
 
             plt.axes( [left,bottom,width,height] )
@@ -940,7 +1085,7 @@ def make_logo_plots(
             if not include_alphadist_in_tcr_feature_logos:
                 clp_rank_scores = [ x for x in clp_rank_scores if x[0] != 'alphadist' ]
             pngfile = '{}.tmpsc_{}_{}.png'.format(logo_pngfile, clp[0], clp[1])
-            left = (margin+dendro_width+title_logo_width+rg_logo_width+tcr_logo_width)/fig_width
+            left = (margin+dendro_width+title_logo_width+batch_bars_width+rg_logo_width+tcr_logo_width)/fig_width
             width = score_logo_width/fig_width
             plt.axes( [left,bottom,width,height] )
             if len(clp_rank_scores):
@@ -965,43 +1110,45 @@ def make_logo_plots(
             plt.xticks([],[])
             plt.yticks([],[])
             if last_row:
-                plt.text(1.0, -0.05, 'TCRseq\nfeatures', ha='right', va='top', fontsize=8,
+                plt.text(0.9, -0.05, 'TCRseq\nfeatures', ha='right', va='top', fontsize=8,
                          transform=plt.gca().transAxes)
 
 
-        # make the gex logo
-        left = (margin+dendro_width+title_logo_width+rg_logo_width+tcr_logo_width+score_logo_width)/fig_width
-        width = gex_logo_width/fig_width
+        if make_cluster_gex_logos: # make the gex logo
+            left = (margin+dendro_width+title_logo_width+batch_bars_width+rg_logo_width+tcr_logo_width+score_logo_width)/fig_width
+            width = gex_logo_width/fig_width
 
-        plt.axes( [left,bottom,width,height] )
+            plt.axes( [left,bottom,width,height] )
 
-        yshift = math.sqrt(3)/2 # 30 60 90 triangle
+            yshift = math.sqrt(3)/2 # 30 60 90 triangle
 
-        xy = []
-        for r in range(3):
-            xoff = 0 if r==1 else 0.5
-            yoff = yshift * ( 1-r )
-            ng = gene_width if r==1 else gene_width-1
-            for ii in range(ng):
-                xy.append( [xoff+ii, yoff] )
+            xy = []
+            for r in range(3):
+                xoff = 0 if r==1 else 0.5
+                yoff = yshift * ( 1-r )
+                ng = gene_width if r==1 else gene_width-1
+                for ii in range(ng):
+                    xy.append( [xoff+ii, yoff] )
 
-        xy = np.array(xy)
-        sizes = [ x*frac_scale for x in fracs ]
-        colors = means
+            xy = np.array(xy)
+            sizes = [ x*frac_scale for x in fracs ]
+            colors = means
 
-        plt.scatter( xy[:,0], xy[:,1], s=sizes, c=colors, cmap = plt.get_cmap('Reds'), vmin=0,
-                     vmax=max_expn_for_gene_logo )
-        plt.xlim( [-0.5, gene_width-0.5] )
-        plt.ylim( [-yshift-0.5, yshift+0.5 ] )
-        plt.xticks([],[])
-        plt.yticks([],[])
-        if last_row:
-            plt.text(0.5,-0.05, 'GEX logo', ha='center', va='top', transform=plt.gca().transAxes)
-            # msg = 'GEX logo genes: row1= {} row2= {} row3= {}'\
-            #     .format(','.join(logo_genes[:gene_width-1]),
-            #             ','.join(logo_genes[gene_width-1:2*gene_width-1]),
-            #             ','.join(logo_genes[2*gene_width-1:]) )
-            # plt.text(1.0,-0.5, msg, ha='right', va='top', transform=plt.gca().transAxes, fontsize=7)
+            plt.scatter( xy[:,0], xy[:,1], s=sizes, c=colors, cmap = plt.get_cmap('Reds'), vmin=0,
+                         vmax=max_expn_for_gene_logo )
+            plt.xlim( [-0.5, gene_width-0.5] )
+            plt.ylim( [-yshift-0.5, yshift+0.5 ] )
+            plt.xticks([],[])
+            plt.yticks([],[])
+            if last_row:
+                plt.text(0.5,-0.05, 'GEX logo', ha='center', va='top', transform=plt.gca().transAxes, fontsize=9)
+                plt.text(0.5,-0.32, '(radius ~ % pos. cells)', ha='center', va='top', fontsize=7,
+                         transform=plt.gca().transAxes)
+                # msg = 'GEX logo genes: row1= {} row2= {} row3= {}'\
+                #     .format(','.join(logo_genes[:gene_width-1]),
+                #             ','.join(logo_genes[gene_width-1:2*gene_width-1]),
+                #             ','.join(logo_genes[2*gene_width-1:]) )
+                # plt.text(1.0,-0.5, msg, ha='right', va='top', transform=plt.gca().transAxes, fontsize=7)
 
 
 
@@ -1240,7 +1387,7 @@ def make_summary_figure(
         #add_integers_legend( plt.gca(), C)
         add_categorical_legend( plt.gca(), cluster_names, [C[x] for x in range(num_clusters)] )
         if irow==0:
-            plt.text(0.01,0.01,'{} clones'.format(adata.shape[0]), ha='left', va='bottom', fontsize=8,
+            plt.text(0.01,0.01,'{} clonotypes'.format(adata.shape[0]), ha='left', va='bottom', fontsize=8,
                      transform=plt.gca().transAxes)
 
 
@@ -1303,46 +1450,220 @@ def make_summary_figure(
 
 
 
-def make_clone_plots(adata, num_clones_to_plot, pngfile, dpi=200):
+def make_clone_gex_umap_plots(
+        adata,
+        outfile_prefix,
+        max_clones = 16,
+        dpi=200,
+):
+
     ''' This is called before we've condensed to a single cell per clone
-    So we don't have PCA or UMAP yet
     '''
 
+    clusters_gex = np.array(adata.obs['clusters_gex'])
 
-    print('make_clone_plots: cluster_and_tsne_and_umap')
-    adata = pp.cluster_and_tsne_and_umap( adata, skip_tcr=True )
-
-    tcrs = pp.retrieve_tcrs_from_adata(adata)
+    tcrs = preprocess.retrieve_tcrs_from_adata(adata, include_subject_id_if_present=True)
 
     unique_tcrs = sorted(set(tcrs))
+    # the clone ids are integer indices into the unique_tcrs list
 
     tcr2clone_id = { x:i for i,x in enumerate(unique_tcrs)}
     clone_ids = np.array( [ tcr2clone_id[x] for x in tcrs ])
 
-    counts = Counter(clone_ids)
+    clone_counts = Counter(clone_ids)
 
-    nrows = int(np.sqrt(num_clones_to_plot))
-    ncols = (num_clones_to_plot-1)//nrows + 1
+    nrows = int(np.sqrt(max_clones))
+    ncols = (max_clones-1)//nrows + 1
 
     plt.figure(figsize=(3*ncols,3*nrows))
     plotno=0
 
     xy = adata.obsm['X_gex_2d']
-    for (clone_id, clone_size) in counts.most_common(num_clones_to_plot):
+    for (clone_id, clone_size) in clone_counts.most_common(max_clones):
         plotno += 1
         plt.subplot(nrows, ncols, plotno)
         plt.scatter(xy[:,0], xy[:,1], s=16, c='gray',alpha=0.2)
         mask = clone_ids==clone_id
-        plt.scatter(xy[mask,0], xy[mask,1], s=16, c='blue', alpha=0.5)
+        plt.scatter(xy[mask,0], xy[mask,1], s=16, c=clusters_gex[mask], #c='blue',
+                    alpha=0.5)
         plt.xlabel('GEX UMAP1')
         plt.ylabel('GEX UMAP2')
         plt.xticks([], [])
         plt.yticks([], [])
-        plt.text(0, 0, '{} cells'.format(clone_size), ha='left', va='bottom', transform=plt.gca().transAxes)
+        plt.text(0, 0, '{} cells'.format(clone_size), ha='left', va='bottom',
+                 transform=plt.gca().transAxes)
     plt.tight_layout()
+    pngfile = outfile_prefix+'_clone_gex_umaps.png'
     print('making:', pngfile)
     plt.savefig(pngfile, dpi=dpi)
 
+
+
+def make_clone_batch_clustermaps(
+        adata,
+        outfile_prefix,
+        batch_keys = None, # if None will look in adata.uns
+        max_clones = 75,
+        min_clone_size = 5,
+        dpi=200,
+        conga_scores = None,             # np.array of pvals
+        tcr_clumping_pvalues = None,      # --""--
+        batch_bias_results = None, # tuple of dataframes: nbrhood_results, hotspot_results
+        cmap_for_row_scores = 'viridis',
+        show_mait_and_inkt_clones = True,
+):
+
+    '''
+    '''
+    try:
+        import seaborn as sns
+    except:
+        print('ERROR seaborn is not installed')
+        return
+
+    if batch_keys is None:
+        if 'batch_keys' not in adata.uns_keys():
+            print('make_clone_batch_clustermaps: no batch_keys in adata.uns')
+            return
+        batch_keys = adata.uns['batch_keys']
+
+    cmap_for_row_scores = plt.get_cmap(cmap_for_row_scores)
+
+    num_clones = adata.shape[0]
+
+    tcrs = preprocess.retrieve_tcrs_from_adata(adata)
+    organism = adata.uns['organism']
+
+    # sort the clonotypes by clone size
+    clone_sizes = np.array(adata.obs['clone_sizes'])
+    sortl = sorted( [(x,i) for i,x in enumerate(clone_sizes)])
+    sortl.reverse() # now in decreasing order of clone size
+
+    top_clone_indices = [x[1] for x in sortl[:max_clones] if x[0] >= min_clone_size]
+
+    if len(top_clone_indices)<2:
+        print('make_clone_batch_clustermaps:: fewer than 2 clones meet size requirements')
+        return
+
+    for batch_key in batch_keys:
+        batch_freqs = adata.obsm[batch_key].astype(float)/clone_sizes[:,np.newaxis]
+        assert batch_freqs.shape[0] == num_clones
+        num_choices = batch_freqs.shape[1]
+
+        colorbar_row_colors = []
+
+        def transform_adjusted_pvalues_into_unit_range(pvalues,
+                                                       max_pval=1.0, min_pval=1e-5):
+            vals = np.sqrt(np.maximum(0., -1*np.log10(np.maximum(
+                1e-299, np.array(pvalues)/max_pval))))
+            vmax = np.sqrt(-1*np.log10(min_pval/max_pval))
+            retvals = np.maximum(0.001, np.minimum(0.999, vals/vmax))
+            #assert False
+            return retvals
+
+        def get_row_colors_from_pvalues(pvalues, cmap=cmap_for_row_scores):
+            vals =  transform_adjusted_pvalues_into_unit_range(pvalues)
+            retvals = [ cmap(x) for x in vals]
+            #assert False
+            return retvals
+
+
+        if conga_scores is not None: # these are adjusted pvalues
+            colorbar_row_colors.append(get_row_colors_from_pvalues(conga_scores[top_clone_indices]))
+
+        if tcr_clumping_pvalues is not None:
+            colorbar_row_colors.append(get_row_colors_from_pvalues(tcr_clumping_pvalues[top_clone_indices]))
+
+        if batch_bias_results is not None:
+            nbrhood_results, hotspot_results = batch_bias_results
+            tcr_nbrhood_pvals = np.full((num_clones,), num_clones).astype(float)
+            for l in nbrhood_results.itertuples():
+                if l.nbrs_tag == 'tcr' and l.batch_key == batch_key:
+                    tcr_nbrhood_pvals[l.clone_index] = min(
+                        l.pvalue_adj, tcr_nbrhood_pvals[l.clone_index])
+            colorbar_row_colors.append(get_row_colors_from_pvalues(tcr_nbrhood_pvals[top_clone_indices]))
+
+            hotspot_pval = 1.
+            for l in hotspot_results.itertuples():
+                if l.nbrs_tag == 'tcr' and l.batch_key == batch_key:
+                    hotspot_pval = min(l.pvalue_adj, hotspot_pval)
+
+            title = 'batch_key: {} num_choices: {} best_hotspot_pval: {:.1e}'\
+                    .format( batch_key, num_choices, hotspot_pval)
+        else:
+            title = 'batch_key: {} num_choices: {}'\
+                    .format( batch_key, num_choices)
+
+
+        if show_mait_and_inkt_clones and organism in ['human','mouse']:
+            colors = []
+            for ii in top_clone_indices:
+                tcr = tcrs[ii]
+                if organism == 'human':
+                    celltype = 2 * tcr_scoring.is_human_mait_alpha_chain(tcr[0])+\
+                               tcr_scoring.is_human_inkt_tcr(tcr)
+                elif organism == 'mouse':
+                    celltype = 2 * tcr_scoring.is_mouse_mait_alpha_chain(tcr[0])+\
+                               tcr_scoring.is_mouse_inkt_alpha_chain(tcr[0])
+                colors.append(['white','C0','C1'][celltype])
+            colorbar_row_colors.append(colors)
+
+        # show clustermap of clone frequencies for the top clones
+        A = []
+        clone_labels = []
+        def trim_allele(s):
+            return s[:s.index('*')]
+        def get_gene_strings(tcr, organism):
+            if organism.endswith('_ig'):
+                va_prefix = tcr[0][0][2]
+            else:
+                va_prefix = ''
+            (va,ja,*_), (vb,jb,*_) = tcr
+            return (va_prefix+trim_allele(va[4:]), trim_allele(ja[4:]),
+                    trim_allele(vb[4:]), trim_allele(jb[4:]))
+        gene_strings = [get_gene_strings(tcrs[x], organism) for x in top_clone_indices]
+        max_valen = max(len(x[0]) for x in gene_strings)
+        max_jalen = max(len(x[1]) for x in gene_strings)
+        max_vblen = max(len(x[2]) for x in gene_strings)
+        max_jblen = max(len(x[3]) for x in gene_strings)
+        for ii, genes in zip(top_clone_indices, gene_strings):
+            A.append(batch_freqs[ii,:])
+            va,ja,vb,jb = genes
+            cdr3a, cdr3b = tcrs[ii][0][2], tcrs[ii][1][2]
+
+            clone_labels.append('{:3d}  {:{}s} {:{}s} {:18s} {:{}s} {:{}s} {:18s}'\
+                                .format(clone_sizes[ii],
+                                        va, max_valen, ja, max_jalen, cdr3a,
+                                        vb, max_vblen, jb, max_jblen, cdr3b))
+
+        A = np.array(A)
+
+        ## things we might want to add row colors for:
+        ##
+        ## - tcr nbr batch bias for this batch_key
+        ## - conga score
+        ## - tcr clumping score
+        ##
+
+        fig_width, fig_height = (10,14)
+        cm = sns.clustermap(A, metric='euclidean', col_cluster=False, vmin=0, vmax=1,
+                            figsize=(fig_width,fig_height), cmap='Reds',
+                            row_colors=colorbar_row_colors)
+
+        row_indices = cm.dendrogram_row.reordered_ind
+        row_labels = [clone_labels[x] for x in row_indices]
+        cm.ax_heatmap.set_yticks( 0.5+np.arange(A.shape[0]))
+        cm.ax_heatmap.set_yticklabels( row_labels, rotation='horizontal', fontdict={'fontsize':8, 'fontfamily':'monospace'} )
+        cm.ax_heatmap.set_xticks([])
+        cm.ax_heatmap.set_xticklabels([])
+        #cm.fig.suptitle(title)
+        cm.ax_heatmap.set_title(title)
+
+
+        pngfile = f'{outfile_prefix}_clone_clustermap_batch_{batch_key}.png'
+        print('saving', pngfile)
+        cm.savefig(pngfile, dpi=200)
+        #assert False
 
 
 
@@ -1712,7 +2033,7 @@ def plot_interesting_features_vs_clustermap(
         colorbar_sorted_tuples.append( [ ('tcrclus'+str(x), cluster_color_dict[x]) for x in range(num_clusters_tcr)])
 
     if show_VJ_gene_segment_colorbars:
-        tcrs = pp.retrieve_tcrs_from_adata(adata)
+        tcrs = preprocess.retrieve_tcrs_from_adata(adata)
         gene_colors, sorted_gene_colors = assign_colors_to_conga_tcrs(tcrs, organism, return_sorted_color_tuples=True)
         colorbar_names.extend('VA JA VB JB'.split())
         colorbar_colors.extend(gene_colors)
@@ -1849,259 +2170,6 @@ def plot_interesting_features_vs_clustermap(
     cm.savefig(pngfile, dpi=200)
 
 
-# def plot_interesting_features_vs_gex_clustermap(
-#         adata,
-#         features,
-#         pngfile,
-#         feature_types = None, # list of either 'gex','tcr'
-#         nbrs = None,
-#         compute_nbr_averages=False,
-#         feature_labels = None,
-#         feature_scores = None,
-#         feature_scores_cmap = 'viridis',
-#         show_gex_cluster_colorbar = True,
-#         show_tcr_cluster_colorbar = False,
-#         show_VJ_gene_segment_colorbars = False,
-#         min_vmax = 0.4,
-#         max_vmax = 0.8,
-#         max_redundant_features = None,
-#         redundancy_threshold = 0.9, # correlation
-#         extra_feature_colors = None,
-# ):
-#     ''' Makes a seaborn clustermap: cols are cells, sorted by hierarchical clustering w gex-pca-euclidean dist
-#     rows are the features, ordered by clustermap correlation
-#     '''
-#     try:
-#         import seaborn as sns
-#     except:
-#         print('ERROR seaborn is not installed')
-#         return
-
-
-#     if len(features)<2:
-#         print('too few features for clustermap:', len(features))
-#         return
-
-#     if feature_labels is None:
-#         feature_labels = features[:]
-
-#     # for the clustermap:
-#     nrows = len(features)
-#     ncols = adata.shape[0]
-
-#     # compute linkage of cells based on gex
-#     X = adata.obsm['X_pca_gex'] # the pca components
-#     print('computing pairwise X_pca_gex distances', X.shape)
-#     Y = distance.pdist(X, metric='euclidean')
-
-#     print('computing linkage matrix from pairwise X_pca_gex distances')
-#     cells_linkage = hierarchy.linkage(Y, method='ward')
-
-#     A = np.zeros((nrows, ncols))
-
-#     var_names = list(adata.raw.var_names)
-
-#     for ii,feature in enumerate(features):
-#         scores = get_raw_feature_scores(feature, adata, feature_types if feature_types is None else feature_types[ii])
-#         # is_gex_feature = feature in var_names and ( feature_types is None or feature_types[ii]=='gex')
-#         # if is_gex_feature:
-#         #     scores = adata.raw.X[:, var_names.index(feature)].toarray()[:,0]
-#         # else:
-#         #     scores = tcr_scoring.make_tcr_score_table(adata, [feature])[:,0].astype(float)
-#         mn, std = np.mean(scores), np.std(scores)
-#         scores -= mn
-#         if std!=0:
-#             scores /= std
-#         else:
-#             print('WHOAH stddev of {} is {} {}'.format(feature, std, mn, scores))
-#             sys.stderr.write('ERROR problem in conga.plotting.plot_interesting_features_vs_gex_clustermap')
-#             return ######################### EARLY RETURN!!!!
-
-#         if compute_nbr_averages:
-#             num_neighbors = nbrs.shape[1] # this will not work for ragged nbr arrays (but we could change it to work)
-#             scores = ( scores + scores[ nbrs ].sum(axis=1) )/(num_neighbors+1)
-
-#         A[ii,:] = scores
-
-
-#     tiny_lines = None
-
-#     if max_redundant_features is not None:
-#         feature_nbrs = {}
-
-#         # filter features by correlation
-#         # will subset: features, feature_types, feature_labels, A, nrows
-#         C = 1-distance.squareform(distance.pdist(A, metric='correlation'), force='tomatrix')
-#         feature_nbr_counts = [0]*len(features)
-#         feature_mask = np.full(len(features), True)
-#         for ii,f1 in enumerate(features):
-#             # am I too close to a previous feature?
-#             for jj in range(ii-1):
-#                 if feature_types is None or feature_types[ii] == feature_types[jj]:
-#                     if C[ii,jj] > redundancy_threshold and feature_mask[jj]:
-#                         print('close:', C[ii,jj], f1, features[jj])
-#                         feature_nbr_counts[jj] += 1
-#                         if feature_nbr_counts[jj] > max_redundant_features:
-#                             feature_mask[ii] = False
-#                             feature_nbrs.setdefault(features[jj],[]).append(f1)
-#                             print('too many close:', feature_nbr_counts[jj], features[jj])
-#                             break
-#         if np.sum(feature_mask)<len(features): # have to exclude some
-#             # write out the feature neighbors for inspection
-#             dfl = []
-#             for f, nbrs in feature_nbrs.items():
-#                 dfl.append(OrderedDict(feature=f, redundant_neighbors=','.join(nbrs), num_redundant_neighbors=len(nbrs)))
-#             df = pd.DataFrame(dfl)
-#             df.sort_values('num_redundant_neighbors', inplace=True, ascending=False)
-#             df.to_csv(pngfile+'_filtered_feature_info.tsv', sep='\t', index=False)
-#             tiny_lines = []
-#             for l in df.itertuples():
-#                 tiny_lines.extend( [x+'\n' for x in [l.feature+':']+ l.redundant_neighbors.split(',')+[''] ] )
-
-#             #
-
-#             #
-#             A = A[feature_mask,:]
-#             features = np.array(features)[feature_mask]
-#             if feature_types is not None:
-#                 feature_types = np.array(feature_types)[feature_mask]
-#             new_feature_labels = []
-#             for old_label, nbr_count, m in zip(feature_labels, feature_nbr_counts, feature_mask):
-#                 if m:
-#                     if nbr_count>max_redundant_features:
-#                         new_feature_labels.append('{} [+{}]'.format(old_label, nbr_count-max_redundant_features))
-#                     else:
-#                         new_feature_labels.append(old_label)
-#             feature_labels = new_feature_labels[:]
-#             nrows = len(features)
-#             if feature_scores is not None:
-#                 feature_scores = np.array(feature_scores)[feature_mask]
-#             if extra_feature_colors is not None:
-#                 extra_feature_colors = np.array(extra_feature_colors)[feature_mask]
-
-
-
-
-#     ## add some cell colors
-#     organism = adata.uns['organism']
-
-#     colorbar_names, colorbar_colors, colorbar_sorted_tuples = [], [], []
-
-#     if show_gex_cluster_colorbar:
-#         clusters_gex = np.array(adata.obs['clusters_gex'])
-#         num_clusters_gex = np.max(clusters_gex)+1
-#         cluster_color_dict = get_integers_color_dict(num_clusters_gex)
-#         colorbar_names.append( 'gex_cluster')
-#         colorbar_colors.append( [cluster_color_dict[x] for x in clusters_gex] )
-#         colorbar_sorted_tuples.append( [ ('gexclus'+str(x), cluster_color_dict[x]) for x in range(num_clusters_gex)])
-
-#     if show_tcr_cluster_colorbar:
-#         clusters_tcr = np.array(adata.obs['clusters_tcr'])
-#         num_clusters_tcr = np.max(clusters_tcr)+1
-#         cluster_color_dict = get_integers_color_dict(num_clusters_tcr)
-#         colorbar_names.append( 'tcr_cluster')
-#         colorbar_colors.append( [cluster_color_dict[x] for x in clusters_tcr] )
-#         colorbar_sorted_tuples.append( [ ('tcrclus'+str(x), cluster_color_dict[x]) for x in range(num_clusters_tcr)])
-
-#     if show_VJ_gene_segment_colorbars:
-#         tcrs = preprocess.retrieve_tcrs_from_adata(adata)
-#         gene_colors, sorted_gene_colors = assign_colors_to_conga_tcrs(tcrs, organism, return_sorted_color_tuples=True)
-#         colorbar_names.extend('VA JA VB JB'.split())
-#         colorbar_colors.extend(gene_colors)
-#         num_to_show = 10 # in the text written at the top
-#         colorbar_sorted_tuples.extend( [ x[:num_to_show] for x in sorted_gene_colors ] )
-
-#     # add some row colors
-#     colorbar_row_colors = []
-#     if feature_scores is not None:
-#         cm = plt.get_cmap(feature_scores_cmap)
-#         vmin, vmax = min(feature_scores), max(feature_scores)
-#         if vmax==vmin: vmax +=.001
-#         normed_scores = [ (x-vmin)/(vmax-vmin) for x in feature_scores]
-#         colorbar_row_colors.append( [ cm(x) for x in normed_scores])
-
-#     if feature_types is not None:
-#         type2color = {'tcr':'C0', 'gex':'C1'}
-#         colorbar_row_colors.append( [ type2color.get(x,'black') for x in feature_types] )
-
-#     if extra_feature_colors is not None:
-#         colorbar_row_colors.append(extra_feature_colors)
-
-#     if not colorbar_row_colors:
-#         colorbar_row_colors = None
-
-#     #gene_colors_df = pd.DataFrame(OrderedDict(zip(colorbar_names, colorbar_colors)))
-
-#     if feature_types is None:
-#         mx = np.max(np.abs(A))
-#     else:
-#         # try to only use other-type features for setting max
-#         mask = [ x=='tcr' for x in feature_types]
-#         if np.sum(mask):
-#             mx = np.max(np.abs(A[mask,:]))
-#         else:
-#             mx = np.max(np.abs(A))
-
-#     mx = min(max_vmax, max(min_vmax, mx))
-#     #mx = np.max(np.abs(A))
-
-#     print('making clustermap; num_features=', len(features))
-#     fig_width = 10
-#     fig_height = max(5.0, len(features)*0.2 )
-#     # not present in older version of seaborn:
-#     #dendrogram_inches = 2.
-#     #dendrogram_ratio = (dendrogram_inches/fig_height, dendrogram_inches/fig_width)
-#     cm = sns.clustermap(A, col_linkage=cells_linkage, metric='correlation', cmap='coolwarm', vmin=-mx, vmax=mx,
-#                         col_colors=colorbar_colors, row_colors=colorbar_row_colors,
-#                         figsize=(fig_width,fig_height))#, dendrogram_ratio=dendrogram_ratio)
-#     row_indices = cm.dendrogram_row.reordered_ind
-#     row_labels = [feature_labels[x] for x in row_indices]
-#     cm.ax_heatmap.set_yticks( 0.5+np.arange(nrows))
-#     cm.ax_heatmap.set_yticklabels( row_labels, rotation='horizontal', fontdict={'fontsize':8} )
-#     cm.ax_heatmap.set_xticks([])
-#     cm.ax_heatmap.set_xticklabels([])
-
-#     # show the top couple V/J genes and their colors
-#     ax = cm.ax_col_dendrogram
-#     col_dendro_width = fig_width * (ax.get_position().x1 - ax.get_position().x0 )
-#     col_dendro_height = fig_height * (ax.get_position().y1 - ax.get_position().y0 )
-
-#     line_height_inches = 0.09
-#     fontsize=7
-#     for ii, sorted_tuples in enumerate(colorbar_sorted_tuples):
-#         ax.text(-0.01, 1.0 - (ii*line_height_inches+0.05)/col_dendro_height,
-#                 colorbar_names[ii], va='top', ha='right', fontsize=fontsize, color='k', transform=ax.transAxes)
-#         for jj in range(len(sorted_tuples)):
-#             gene, color = sorted_tuples[jj]
-#             ax.text(float(jj)/len(sorted_tuples), 1.0 - (ii*line_height_inches+0.05)/col_dendro_height,
-#                     gene, va='top', ha='left', fontsize=fontsize, color=color, transform=ax.transAxes)
-
-#     # show the tiny_lines
-#     if tiny_lines is not None:
-#         ax = cm.ax_row_dendrogram
-#         row_dendro_width = fig_width * (ax.get_position().x1 - ax.get_position().x0 )
-#         row_dendro_height = fig_height * (ax.get_position().y1 - ax.get_position().y0 )
-
-#         max_lines = int(row_dendro_height / 0.08)
-#         col_width_frac = 0.45 / row_dendro_width
-#         x_offset = 0
-#         tiny_fontsize=5
-#         ax.text(0.0, 1.0, 'Correlated\nfeatures\nomitted:', va='bottom', ha='left', fontsize=tiny_fontsize,
-#                 transform=ax.transAxes, zorder=-1, color='black')
-#         while tiny_lines:
-#             ax.text(x_offset, 1.0, ''.join(tiny_lines[:max_lines]), va='top', ha='left', fontsize=tiny_fontsize,
-#                     transform=ax.transAxes, zorder=-1, color='blue')
-#             x_offset += col_width_frac
-#             tiny_lines = tiny_lines[max_lines:]
-#             if tiny_lines and x_offset+col_width_frac/2>1.0:
-#                 ax.text(x_offset, 1.0, '...', va='top', ha='left', fontsize=tiny_fontsize,transform=ax.transAxes)
-#                 break
-
-
-#     print('saving', pngfile)
-
-#     cm.savefig(pngfile, dpi=200)
-
 def plot_cluster_gene_compositions(
         adata,
         pngfile
@@ -2116,7 +2184,7 @@ def plot_cluster_gene_compositions(
     clusters_gex = np.array(adata.obs['clusters_gex'])
     clusters_tcr = np.array(adata.obs['clusters_tcr'])
 
-    tcrs = pp.retrieve_tcrs_from_adata(adata)
+    tcrs = preprocess.retrieve_tcrs_from_adata(adata)
 
     gene_colors, sorted_gene_colors = assign_colors_to_conga_tcrs(tcrs, organism, return_sorted_color_tuples=True)
 
@@ -2176,15 +2244,14 @@ def make_cluster_logo_plots_figure(
         adata,
         scores,
         max_good_score,
+        clusters_gex,
+        clusters_tcr,
         nbrs_gex,
         nbrs_tcr,
         min_cluster_size,
         pngfile,
         **kwargs # passed to make_logo_plots
 ):
-    clusters_gex = np.array(adata.obs['clusters_gex'])
-    clusters_tcr = np.array(adata.obs['clusters_tcr'])
-
     cluster_tcr_score_names = tcr_scoring.all_tcr_scorenames
 
     good_mask = (scores <= max_good_score)
@@ -2199,17 +2266,570 @@ def make_cluster_logo_plots_figure(
             adata, good_mask, clusters_gex, clusters_tcr, cluster_tcr_score_names, min_count=min_cluster_size)
 
         # run rank_genes on most common bics
-        rank_genes_uns_tag = 'rank_genes_good_biclusters'
+        if 'rank_genes_uns_tag' in kwargs:
+            rank_genes_uns_tag = kwargs['rank_genes_uns_tag']
+            del kwargs['rank_genes_uns_tag']# since we pass it explicitly below
+        else:
+            rank_genes_uns_tag = f'rg_{num_good_biclusters}_{np.sum(good_mask)}_biclusters'
+
         correlations.run_rank_genes_on_good_biclusters(
             adata, good_mask, clusters_gex, clusters_tcr, min_count=min_cluster_size, key_added= rank_genes_uns_tag)
 
         make_logo_plots(
             adata, nbrs_gex, nbrs_tcr, min_cluster_size, pngfile,
             conga_scores = scores,
+            clusters_gex = clusters_gex,
+            clusters_tcr = clusters_tcr,
             good_score_mask = good_mask,
             good_bicluster_tcr_scores = good_bicluster_tcr_scores,
             rank_genes_uns_tag = rank_genes_uns_tag,
             **kwargs)
+
+
+def make_hotspot_nbrhood_logo_figures(
+        adata,
+        nbrs_gex,
+        nbrs_tcr,
+        hotspot_nbrhood_results_df,
+        min_cluster_size,
+        outfile_prefix,
+        pvalue_threshold=1.0,
+        **kwargs # passed to make_logo_plots
+):
+    #unpacking
+    clusters_gex = np.array(adata.obs['clusters_gex'])
+    clusters_tcr = np.array(adata.obs['clusters_tcr'])
+    num_clones = adata.shape[0]
+
+    #
+    nbrhood_pvals = { 'gex':np.full((num_clones,), num_clones).astype(float),
+                      'tcr':np.full((num_clones,), num_clones).astype(float) }
+    for l in hotspot_nbrhood_results_df.itertuples():
+        assert l.feature_type[3:] == '_nbrs_vs_graph'
+        tag = l.feature_type[:3]
+        nbrhood_pvals[tag][l.clone_index] = min(l.pvalue_adj, nbrhood_pvals[tag][l.clone_index])
+
+    fake_clusters = np.full( (num_clones,), 0)
+
+    for tag, pvals in nbrhood_pvals.items():
+        # are there any clusters with enough significant pvals??
+        if tag == 'gex':
+            fake_clusters_gex = clusters_gex
+            fake_clusters_tcr = fake_clusters
+        else:
+            fake_clusters_gex = fake_clusters
+            fake_clusters_tcr = clusters_tcr
+
+        pngfile = f'{outfile_prefix}_hotspot_nbrhood_{tag}_clusters.png'
+
+        if 'rank_genes_uns_tag' not in kwargs:
+            kwargs['rank_genes_uns_tag'] = f'rg_hotspot_{tag}_nbrhood_biclusters'
+
+        make_cluster_logo_plots_figure(adata, pvals, pvalue_threshold, fake_clusters_gex, fake_clusters_tcr,
+                                       nbrs_gex, nbrs_tcr, min_cluster_size, pngfile, **kwargs)
+
+
+
+def make_tcr_clumping_plots(
+        adata,
+        results_df, # generated by tcr_clumping.py: assess_tcr_clumping
+        nbrs_gex,
+        nbrs_tcr,
+        min_cluster_size_for_logos,
+        pvalue_threshold_for_logos,
+        outfile_prefix,
+        max_color_pvalue = 1e-16, # in the UMAP figure; no brighter beyond there
+        **logo_plot_args,
+):
+    num_clones = adata.shape[0]
+    fake_clusters_gex = np.zeros((num_clones,)).astype(int)
+    fake_clusters_tcr = np.zeros((num_clones,)).astype(int)
+    clumping_pvals = np.full( (num_clones,), num_clones).astype(float)
+    for l in results_df.itertuples():
+        clumping_pvals[ l.clone_index] = min( l.pvalue_adj, clumping_pvals[l.clone_index])
+        fake_clusters_tcr[l.clone_index] = l.clumping_group
+
+    pngfile = f'{outfile_prefix}_tcr_clumping_logos.png'
+
+    if 'rank_genes_uns_tag' not in logo_plot_args:
+        logo_plot_args['rank_genes_uns_tag'] = 'rg_tcr_clumping_biclusters'
+
+    make_cluster_logo_plots_figure(
+        adata, clumping_pvals, pvalue_threshold_for_logos, fake_clusters_gex, fake_clusters_tcr, nbrs_gex, nbrs_tcr,
+        min_cluster_size_for_logos, pngfile, **logo_plot_args)
+
+    # make umaps colored by clumping pvals
+    plt.figure(figsize=(12,6))
+    for icol, tag in enumerate(['gex','tcr']):
+        plt.subplot(1,2,icol+1)
+        colors = np.sqrt( np.maximum(0.0, -1*np.log10(np.maximum(1e-100, clumping_pvals)))) # no log10 of 0.0
+        #print('colors:', tag, np.max(colors), list(colors[:100]))
+        reorder = np.argsort(colors)
+        xy = adata.obsm['X_{}_2d'.format(tag)] # same umap as feature nbr-type
+        vmax = np.sqrt(-1*np.log10(max_color_pvalue))
+        #vmax = np.sqrt(-1*np.log10(1e-5))
+        plt.scatter( xy[reorder,0], xy[reorder,1], c=colors[reorder], vmin=0, vmax=vmax)
+        plt.colorbar()
+        plt.xticks([],[])
+        plt.yticks([],[])
+        plt.xlabel('{} UMAP1'.format(tag.upper()))
+        plt.ylabel('{} UMAP2'.format(tag.upper()))
+        plt.title('TCR clumping pvalues')
+    plt.tight_layout()
+    pngfile = '{}_tcr_clumping.png'.format(outfile_prefix)
+    print('making:', pngfile)
+    plt.savefig(pngfile)
+
+
+def make_batch_bias_plots(
+        adata,
+        nbrhood_results_df, # generated by correlations.py: find_batch_biases
+        nbrs_gex,
+        nbrs_tcr,
+        min_cluster_size_for_logos,
+        pvalue_threshold_for_logos,
+        outfile_prefix,
+        max_color_pvalue = 1e-9, # in the UMAP figure; no brighter beyond there
+):
+    num_clones = adata.shape[0]
+    fake_clusters_gex = np.zeros((num_clones,)).astype(int)
+    fake_clusters_tcr = np.zeros((num_clones,)).astype(int)
+    batch_bias_pvals = np.full( (num_clones,), num_clones).astype(float)
+    for l in nbrhood_results_df.itertuples():
+        batch_bias_pvals[ l.clone_index] = min( l.pvalue_adj, batch_bias_pvals[l.clone_index])
+        fake_clusters_tcr[l.clone_index] = l.cluster_group
+
+    pngfile = f'{outfile_prefix}_batch_bias_logos.png'
+
+    make_cluster_logo_plots_figure(
+        adata, batch_bias_pvals, pvalue_threshold_for_logos, fake_clusters_gex, fake_clusters_tcr, nbrs_gex, nbrs_tcr,
+        min_cluster_size_for_logos, pngfile, rank_genes_uns_tag='rg_batch_bias_biclusters')
+
+    # make umaps colored by batch_bias pvals
+    plt.figure(figsize=(12,6))
+    for icol, tag in enumerate(['gex','tcr']):
+        plt.subplot(1,2,icol+1)
+        colors = np.sqrt( np.maximum(0.0, -1*np.log10(np.maximum(1e-100, batch_bias_pvals)))) # no log10 of 0.0
+        #print('colors:', tag, np.max(colors), list(colors[:100]))
+        reorder = np.argsort(colors)
+        xy = adata.obsm['X_{}_2d'.format(tag)] # same umap as feature nbr-type
+        vmax = np.sqrt(-1*np.log10(max_color_pvalue))
+        #vmax = np.sqrt(-1*np.log10(1e-5))
+        plt.scatter( xy[reorder,0], xy[reorder,1], c=colors[reorder], vmin=0, vmax=vmax)
+        plt.colorbar()
+        plt.xticks([],[])
+        plt.yticks([],[])
+        plt.xlabel('{} UMAP1'.format(tag.upper()))
+        plt.ylabel('{} UMAP2'.format(tag.upper()))
+        plt.title('TCR batch_bias pvalues')
+    plt.tight_layout()
+    pngfile = '{}_batch_bias.png'.format(outfile_prefix)
+    print('making:', pngfile)
+    plt.savefig(pngfile)
+
+def analyze_proteins(
+        adata,
+        outfile_prefix,
+        exclude_protein_prefixes = ['HTO', 'TCRV', 'TCRv'],
+        n_components_prot=20,
+        n_components_gex=40,
+
+):
+    ''' run pca on the protein data
+
+    '''
+    from sklearn.metrics import pairwise_distances
+    from scipy.stats import describe
+
+    # tmp hacking:
+    num_clones = adata.shape[0]
+    # if 'group' not in adata.uns['batch_keys'] or adata.obsm['group'].shape != (num_clones,4):
+    #     print('need proper group info:', 'group' in adata.uns['batch_keys'])
+    #     return
+
+    ft_varname = util.get_feature_types_varname(adata)
+    prot_mask = np.array(adata.raw.var[ft_varname] == 'Antibody Capture')
+    for p in exclude_protein_prefixes:
+        prot_mask &= ~adata.raw.var_names.str.startswith(p)
+    print('used_protein_features:', list(adata.raw.var_names[prot_mask]))
+    X = adata.raw.X.tocsc()[:,prot_mask].toarray()
+    print(type(X), X.shape)
+    mn = np.mean(X, axis=0)
+    #print('mn:', mn)
+    sd = np.std(X, axis=0)
+    #print('sd:', sd)
+    X = (X-mn[np.newaxis,:])/sd[np.newaxis,:]
+    pca = PCA()
+    X_pca = pca.fit_transform(X)
+    print('pca_variance:', pca.explained_variance_ratio_[:n_components_prot+1])
+    X_pca_prot = X_pca[:,:n_components_prot]
+    X_pca_gex  = adata.obsm['X_pca_gex'][:,:n_components_gex]
+    nrandom = 1000
+    inds = np.random.permutation(adata.shape[0])[:nrandom]
+    D_prot = pairwise_distances(X_pca_prot[inds,:])
+    D_gex = pairwise_distances(X_pca_gex[inds,:])
+    print('gex_dists: ', describe(D_gex.ravel()))
+    print('prot_dists:', describe(D_prot.ravel()))
+    print('dist_ratio:', np.mean(D_prot.ravel()) / np.mean(D_gex.ravel()))
+
+    X_pca_combo = np.hstack([X_pca_gex, X_pca_prot])
+    print('X_pca_combo:', X_pca_combo.shape)
+
+    for tag, X_pca in [['prot', X_pca_prot], ['combo', X_pca_combo]]:
+
+        adata.obsm['X_pca'] = X_pca
+        adata.obsm[f'X_pca_{tag}'] = np.copy(X_pca) # force copy
+        print('neighbors:', tag, X_pca.shape)
+        sc.pp.neighbors(adata, n_neighbors=10, n_pcs=X_pca.shape[1])
+
+        print('umap:', tag)
+        sc.tl.umap(adata)
+        adata.obsm['X_umap_'+tag] = adata.obsm['X_umap']
+        cluster_key_added = 'louvain_'+tag
+        resolution = 1.0
+        print('louvain:', tag)
+        sc.tl.louvain(adata, resolution=resolution, key_added=cluster_key_added)
+        adata.obs['clusters_'+tag] = np.copy(adata.obs[cluster_key_added]).astype(int)
+        adata.obsm['X_{}_2d'.format(tag)] = adata.obsm['X_umap_'+tag]
+
+
+
+
+    xy_tags = ['gex','prot','combo']
+    special_genes = ['ZBTB16','RTKN2','CD79A']
+    trbv = 'TRBV12-5'
+    genes = ['CD45RA_p']+special_genes+['min_special',trbv]
+
+    if 'group' in adata.obs_keys():
+        other = ['CD4','CD8','group_0','group_1','group_2','group_3']
+
+        group_counts = adata.obsm['group'].astype(float)
+        group_fracs = group_counts/(np.sum(group_counts,axis=1)[:,np.newaxis])
+        assert np.max(group_fracs)<1.001
+        assert group_fracs.shape == (num_clones, 4)
+    else:
+        other = ['CD4','CD8']
+
+    nrows, ncols, plotno = len(xy_tags), 1+len(genes)+len(other), 0
+    plt.figure(figsize=(ncols*2.5, nrows*3))
+
+    var_names = list(adata.raw.var_names)
+    for xy_tag in xy_tags:
+        xy = adata.obsm[f'X_{xy_tag}_2d']
+
+        # calculate nbrs for averaging
+        obsm_tag = f'X_pca_{xy_tag}'
+        assert obsm_tag in adata.obsm_keys()
+        num_nbrs = max(1, min(num_clones//10, max(20, num_clones//500)))
+        nbr_frac = (num_nbrs+0.1)/num_clones
+        all_nbrs = preprocess.calc_nbrs(adata, [nbr_frac], obsm_tag_gex=obsm_tag, obsm_tag_tcr=None)
+        nbrs = all_nbrs[nbr_frac][0]
+        assert num_nbrs == nbrs.shape[1]
+        all_nbr_avg_colors = {}
+        for colortag in [xy_tag] + other + genes:
+            plotno += 1
+            plt.subplot(nrows, ncols, plotno)
+            cmap = 'viridis'
+            title = colortag
+            nbr_avg = False
+            sort_order = True
+            if colortag == 'min_special':
+                colors = np.hstack( [all_nbr_avg_colors[x][:,np.newaxis] for x in special_genes])
+                assert colors.shape == (num_clones, len(special_genes))
+                colors = np.min(colors, axis=1)
+            elif colortag == trbv:
+                colors = np.array(adata.obs['vb'].str.startswith(trbv)).astype(float)
+                nbr_avg = True
+            elif colortag == 'CD4':
+                colors = adata.raw.X[:,var_names.index('CD4_p')].toarray()[:,0]
+            elif colortag == 'CD8':
+                colors = 0.5 * ( adata.raw.X[:,var_names.index('CD8_p')].toarray()[:,0]+
+                                adata.raw.X[:,var_names.index('CD8a_p')].toarray()[:,0])
+            elif colortag in genes:
+                colors = adata.raw.X[:,var_names.index(colortag)].toarray()[:,0]
+                nbr_avg = True
+            elif colortag in xy_tags:
+                colors = adata.obs[f'clusters_{colortag}']
+                cmap = 'tab20'
+                title = f'{colortag} clusters ({np.max(colors)+1})'
+                sort_order = False
+            else:
+                assert colortag.startswith('group_')
+                g = int(colortag.split('_')[1])
+                colors = group_fracs[:,g]
+                nbr_avg = True
+
+            if nbr_avg:
+                colors = (colors + colors[nbrs].sum(axis=1))/(num_nbrs+1)
+                title = f'{title} nbr-avg-{num_nbrs}'
+                all_nbr_avg_colors[colortag] = colors
+
+            if sort_order:
+                reorder = np.argsort(colors)
+            else:
+                reorder = np.arange(num_clones)
+
+            plt.scatter(xy[reorder,0], xy[reorder,1], s=5, c=colors[reorder], cmap=cmap)
+            plt.xticks([],[])
+            plt.yticks([],[])
+            #plt.xlabel(xy_tag)
+            plt.ylabel(xy_tag)
+            plt.title(title)
+            plt.colorbar()
+    pngfile = outfile_prefix+'_prot_combo_special_panels.png'
+    print('making:', pngfile)
+    plt.tight_layout()
+    plt.savefig(pngfile)
+
+def analyze_special_genes(
+        adata,
+        outfile_prefix,
+        special_genes = ['ZBTB16', 'RTKN2', 'CD79A'],
+        obs_tag_clusters = 'clusters_gex',
+        obsm_tag_nbrs = 'X_pca_gex',
+        obsm_tag_xy = 'X_gex_2d',
+        trbvs = ['TRBV12-5', 'TRBV4-1'],
+        other_genes = ['KLRB1'],
+        nbrs = None,
+        num_nbrs = None,
+
+):
+    ''' analyze special genes
+
+    '''
+    #from sklearn.metrics import pairwise_distances
+    from scipy.stats import linregress, mannwhitneyu
+
+    assert obsm_tag_xy in adata.obsm_keys()
+    assert obsm_tag_nbrs in adata.obsm_keys()
+
+    num_clones = adata.shape[0]
+
+    genes = ['clusters', 'CD4', 'CD8'] + other_genes + special_genes + ['min_special']+trbvs
+
+    ncols = 4
+    nrows = (len(genes)+len(trbvs)-1)//ncols + 1
+    plotno=0
+
+    plt.figure(figsize=(ncols*3, nrows*3))
+
+    var_names = list(adata.raw.var_names)
+    xy = adata.obsm[obsm_tag_xy]
+
+    # calculate nbrs for averaging
+    if num_nbrs is None:
+        if nbrs is None:
+            num_nbrs = max(1, min(num_clones//10, max(20, num_clones//500)))
+        else:
+            num_nbrs = nbrs.shape[1]
+
+    if num_nbrs and nbrs is None:
+        print('computing nbrs:', adata.shape, num_nbrs)
+        nbr_frac = (num_nbrs+0.1)/num_clones
+        all_nbrs = preprocess.calc_nbrs(adata, [nbr_frac], obsm_tag_gex=obsm_tag_nbrs, obsm_tag_tcr=None)
+        nbrs = all_nbrs[nbr_frac][0]
+        assert num_nbrs == nbrs.shape[1]
+
+    all_nbr_avg_colors = {}
+    for colortag in genes:
+        plotno += 1
+        plt.subplot(nrows, ncols, plotno)
+        cmap = 'viridis'
+        title = colortag
+        nbr_avg = False
+        sort_order = True
+        if colortag == 'min_special':
+            colors = np.hstack( [all_nbr_avg_colors[x][:,np.newaxis] for x in special_genes])
+            assert colors.shape == (num_clones, len(special_genes))
+            colors = np.min(colors, axis=1)
+            all_nbr_avg_colors[colortag] = colors # already averaged...
+        elif colortag == 'clusters':
+            colors = adata.obs[obs_tag_clusters]
+            cmap = 'tab20'
+            title = f'clusters ({np.max(colors)+1})'
+            sort_order = False
+        elif colortag in trbvs:
+            colors = np.array(adata.obs['vb'].str.startswith(colortag)).astype(float)
+            nbr_avg = True
+        elif colortag == 'CD4':
+            if 'CD4_p' in var_names:
+                title = 'CD4_prot'
+                colors = adata.raw.X[:,var_names.index('CD4_p')].toarray()[:,0]
+            elif 'CD4' in var_names:
+                title = 'CD4_gex'
+                colors = adata.raw.X[:,var_names.index('CD4')].toarray()[:,0]
+            else:
+                colors = np.zeros((num_clones,))
+        elif colortag == 'CD8':
+            if 'CD8_p' in var_names:
+                title = 'CD8_prot'
+                colors = 0.5 * ( adata.raw.X[:,var_names.index('CD8_p')].toarray()[:,0]+
+                                 adata.raw.X[:,var_names.index('CD8a_p')].toarray()[:,0])
+            else:
+                title = 'CD8_gex'
+                colors = 0.5 * ( adata.raw.X[:,var_names.index('CD8A')].toarray()[:,0]+
+                                 adata.raw.X[:,var_names.index('CD8B')].toarray()[:,0])
+        else:
+            colors = adata.raw.X[:,var_names.index(colortag)].toarray()[:,0]
+            nbr_avg = True
+
+        if nbr_avg:
+            if num_nbrs:
+                colors = (colors + colors[nbrs].sum(axis=1))/(num_nbrs+1)
+            title = f'{title} nbr-avg-{num_nbrs}'
+            all_nbr_avg_colors[colortag] = colors
+
+        if sort_order:
+            reorder = np.argsort(colors)
+        else:
+            reorder = np.arange(num_clones)
+
+        plt.scatter(xy[reorder,0], xy[reorder,1], s=5, c=colors[reorder], cmap=cmap)
+        plt.xticks([],[])
+        plt.yticks([],[])
+        #plt.xlabel(xy_tag)
+        #plt.ylabel(xy_tag)
+        plt.title(title)
+        plt.colorbar()
+
+    for trbv in trbvs:
+        xvals = all_nbr_avg_colors[trbv]
+        yvals = all_nbr_avg_colors['min_special']
+        slope, intercept, r, p, err = linregress(xvals, yvals)
+        mask = np.array(adata.obs['vb'].str.startswith(trbv))
+        _,mwu_p = mannwhitneyu(yvals[mask], yvals[~mask])
+        print(f'trbv_vs_special: {trbv} {r:.2f} {p:.2e} {mwu_p:.2e}')
+        plotno+= 1
+        plt.subplot(nrows, ncols, plotno)
+        plt.scatter(xvals, yvals, s=5)
+        plt.title(f'{trbv} r: {r:.2f}\nP: {p:.1e} {mwu_p:.1e}')
+        plt.xlabel(trbv)
+        plt.ylabel('min_special')
+
+    pngfile = outfile_prefix+'_special_genes.png'
+    print('making:', pngfile)
+    plt.tight_layout()
+    plt.savefig(pngfile, dpi=200)
+    plt.close()
+
+    return nbrs # may be useful for caller?
+
+
+def analyze_CD4_CD8(
+        adata,
+        nbrs_gex,
+        outfile_prefix,
+        cd4_genes_default = ['CD4'],
+        cd8_genes_default = ['CD8A', 'CD8B'],
+        cd4_proteins_default = ['CD4_p'],
+        cd8_proteins_default = ['CD8_p', 'CD8a_p'],
+):
+    import matplotlib.pyplot as plt
+    if adata.uns['organism'] != 'human':
+        # only really makes sense for human tcr AB
+        print('analyze_CD4_CD8 incompatible organism:', adata.uns['organism'])
+        return
+
+    clusters_gex = np.array(adata.obs['clusters_gex'])
+    num_clones = adata.shape[0]
+
+    for ptag in ['gex','prot']:
+        if ptag == 'gex':
+            cd4_genes = [ x for x in cd4_genes_default if x in adata.raw.var_names]
+            cd8_genes = [ x for x in cd8_genes_default if x in adata.raw.var_names]
+        else:
+            cd4_genes = [ x for x in cd4_proteins_default if x in adata.raw.var_names]
+            cd8_genes = [ x for x in cd8_proteins_default if x in adata.raw.var_names]
+
+        if not cd4_genes or not cd8_genes:
+            continue
+
+        all_gex = {}
+
+        for gene in cd4_genes + cd8_genes:
+            index = list(adata.raw.var_names).index(gene)
+            all_gex[gene] = adata.raw.X[:,index].toarray()[:,0]
+
+        # look at neighborhoods
+        xvals = np.copy(all_gex[cd8_genes[0]])
+        for g in cd8_genes[1:]:
+            xvals += all_gex[g]
+        xvals/= len(cd8_genes)
+
+        yvals = np.copy(all_gex[cd4_genes[0]])
+        for g in cd4_genes[1:]:
+            yvals += all_gex[g]
+        yvals/= len(cd4_genes)
+
+        num_nbrs = nbrs_gex.shape[1]
+
+        xvals_nbr_avged = (xvals + xvals[nbrs_gex].sum(axis=1))/(num_nbrs+1)
+        yvals_nbr_avged = (yvals + yvals[nbrs_gex].sum(axis=1))/(num_nbrs+1)
+
+        npanels = 2 + 3 + len(cd4_genes) + len(cd8_genes)
+        ncols = 4
+        nrows = (npanels-1)/ncols + 1
+
+        plt.figure(figsize=(ncols*3, nrows*3))
+        plt.subplot(nrows, ncols, 1)
+        plt.scatter(xvals_nbr_avged, yvals_nbr_avged, alpha=0.25, c=clusters_gex, cmap='tab20')
+        if ptag=='prot':
+            plt.xlim((0, 5))
+            plt.ylim((0, 5))
+        else:
+            plt.xlim((0, plt.xlim()[1]))
+            plt.ylim((0, plt.ylim()[1]))
+        plt.xlabel('+'.join(cd8_genes))
+        plt.ylabel('+'.join(cd4_genes))
+
+
+        plt.subplot(nrows, ncols, 2)
+        num_clusters = np.max(clusters_gex)+1
+        vals = []
+        for c in range(num_clusters):
+            mask = clusters_gex==c
+            x = np.sum(xvals[mask])/np.sum(mask)
+            y = np.sum(yvals[mask])/np.sum(mask)
+            vals.append((x,y,c))
+        plt.scatter([x[0] for x in vals], [x[1] for x in vals], c=[x[2] for x in vals], cmap='tab20', s=50)
+        for x,y,c in vals:
+            plt.text(x,y,str(c))
+        plt.xlabel('+'.join(cd8_genes))
+        plt.ylabel('+'.join(cd4_genes))
+        if ptag=='prot':
+            plt.xlim((0, 5))
+            plt.ylim((0, 5))
+            plt.plot([0,5],[0,5],':k')
+        else:
+            plt.xlim((0, plt.xlim()[1]))
+            plt.ylim((0, plt.ylim()[1]))
+
+        plotno=2
+        xy = adata.obsm['X_gex_2d']
+        for color in ['cluster','n_genes','n_counts']+cd4_genes+cd8_genes:
+            plotno += 1
+            plt.subplot(nrows, ncols, plotno)
+            if color == 'cluster':
+                colors = clusters_gex
+                cmap='tab20'
+                reorder = np.arange(len(colors))
+            elif color in ['n_genes','n_counts']:
+                colors = np.array(adata.obs[color])
+                cmap = 'viridis'
+                reorder = np.argsort(colors)
+            else:
+                colors = all_gex[color]
+                cmap = 'viridis'
+                reorder = np.argsort(colors)
+            plt.scatter(xy[reorder,0], xy[reorder,1], s=5, c=colors[reorder], cmap=cmap)
+            plt.colorbar()
+            plt.title(color)
+
+        pngfile = f'{outfile_prefix}_cd4_cd8_{ptag}.png'
+        plt.savefig(pngfile)
+        print('making:', pngfile)
+
+
 
 def make_tcrdist_trees( adata, output_prefix, group_by = None):
     """
@@ -2232,7 +2852,7 @@ def make_tcrdist_trees( adata, output_prefix, group_by = None):
     clusters = np.array(adata.obs[group_by])
 
     num_clusters = np.max(clusters)+1
-    tcrs = pp.retrieve_tcrs_from_adata(adata)
+    tcrs = preprocess.retrieve_tcrs_from_adata(adata)
 
     num_clones = adata.shape[0]
     if 'conga_scores' in adata.obs_keys():

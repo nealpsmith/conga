@@ -1,21 +1,11 @@
 from . import preprocess as pp
+from . import util
 import numpy as np
 from scipy.stats import hypergeom
 from scipy.special import binom
 import sys
 from collections import Counter
 import pandas as pd
-
-def get_feature_types_varname( adata ):
-    ''' SPECIAL HACK for AGBT dataset
-    Figure out the correct "feature_types" varname, e.g. feature_types-0 or feature_types-0-0
-    '''
-    for name in adata.var: # the columns of the var dataframe
-        if name.startswith('feature_types'):
-            return name
-    print('unable to find feature_types varname')
-    print(adata.var_names)
-    return None
 
 def get_gene_ids_varname( adata ):
     ''' Figure out the correct "gene_ids" varname, e.g. gene_ids-0 or gene_ids-0-0
@@ -31,7 +21,7 @@ def get_tenx_agbt_pmhc_var_names( adata ):
     raw = adata.raw
     if raw is None:
         raw = adata
-    ab_capture_mask = ( raw.var[ get_feature_types_varname( adata )] == 'Antibody Capture' )
+    ab_capture_mask = ( raw.var[ util.get_feature_types_varname( adata )] == 'Antibody Capture' )
     not_totalseq_mask = ~raw.var_names.str.contains('TotalSeq')
     pmhc_mask = ab_capture_mask & not_totalseq_mask
 
@@ -45,7 +35,7 @@ def get_pmhc_short_and_long_names_dicts( adata ):
     if raw is None:
         raw = adata
 
-    ab_capture_mask = ( raw.var[ get_feature_types_varname( adata )] == 'Antibody Capture' )
+    ab_capture_mask = ( raw.var[ util.get_feature_types_varname( adata )] == 'Antibody Capture' )
     not_totalseq_mask = ~raw.var_names.str.contains('TotalSeq')
     pmhc_mask = ab_capture_mask & not_totalseq_mask
 
@@ -344,7 +334,7 @@ def calc_clone_pmhc_pvals(adata, min_log1p_delta=2.0, min_actual_delta=3 ):
                             for ii,m in enumerate(is_pmhc_pos) ] )
     all_pmhc_counts = Counter( top_pmhcs )
 
-    tcrs = pp.retrieve_tcrs_from_adata(adata) # may contain duplicates
+    tcrs = pp.retrieve_tcrs_from_adata(adata, include_subject_id_if_present=True) # may contain duplicates
     unique_tcrs = sorted(set(tcrs))
     num_clones = len(unique_tcrs)
     tcr2clone_id = { y:x for x,y in enumerate(unique_tcrs)}

@@ -5,13 +5,24 @@ and workflows. `conga` was developed to detect correlation between
 T cell gene expression profile and TCR sequence in single-cell datasets. We've just
 recently added support for gamma delta TCRs and for B cells, too.
 `conga` is in active development right now so the interface may change in
-the next few months. Questions and requests can be directed to `pbradley` at `fredhutch` dot `org`.
+the next few months. Questions and requests can be directed to `pbradley` at `fredhutch` dot `org` or
+`stefan.schattgen` at `stjude` dot `org`.
 
 Further details on `conga` can be found in the preprint entitled
 **"Linking T cell receptor sequence to transcriptional profiles with clonotype neighbor graph analysis (CoNGA)"**
 by Stefan A. Schattgen, Kate Guion, Jeremy Chase Crawford, Aisha Souquette, Alvaro Martinez Barrio, Michael J.T. Stubbington,
 Paul G. Thomas, and Philip Bradley, accessible on the bioRxiv server
 [here](https://www.biorxiv.org/content/10.1101/2020.06.04.134536v1).
+
+# Table of Contents
+
+* [Running](https://github.com/phbradley/conga#running)
+* [Installation](https://github.com/phbradley/conga#installation)
+* [Migrating Seurat data to CoNGA](https://github.com/phbradley/conga#migrating-seurat-data-to-conga)
+* [Updates](https://github.com/phbradley/conga#updates)
+* [SVG to PNG](https://github.com/phbradley/conga#svg-to-png)
+* [Examples](https://github.com/phbradley/conga#examples)
+* [The CoNGA data model: where stuff is stored](https://github.com/phbradley/conga#conga-data-model-where-stuff-is-stored)
 
 # Running
 
@@ -20,11 +31,10 @@ Python scripts are provided in the `scripts/` directory but analysis steps can a
 in jupyter notebooks (for example, [a simple pipeline](simple_conga_pipeline.ipynb) and
 [Seurat to conga](Seurat_to_Conga.ipynb) in the top directory of this repo)
 or in your own python scripts through the interface in the `conga` python package.
-The examples below and in the jupyter notebooks feature publicly available data from 10X Genomics,
-which can be downloaded
-using these links: [GEX data](https://support.10xgenomics.com/single-cell-vdj/datasets/2.2.0/vdj_v1_hs_pbmc_5gex) and
-[TCR data](https://support.10xgenomics.com/single-cell-vdj/datasets/2.2.0/vdj_v1_hs_pbmc_t).
-
+The examples in the `examples/` folder described below and in the jupyter notebooks feature publicly available data from 10x Genomics,
+which can be downloaded in a single
+[zip file](https://www.dropbox.com/s/r7rpsftbtxl89y5/conga_example_datasets_v1.zip?dl=0) or at the
+[10x genomics datasets webpage](https://support.10xgenomics.com/single-cell-vdj/datasets/).
 
 1. **SETUP**: The TCR data is converted to a form that can be read by `conga` and then
 a matrix of `TCRdist` distances is computed. KernelPCA is applied to this distance
@@ -32,22 +42,23 @@ matrix to generate a PC matrix that can be used in clustering and dimensionality
 is accomplished with the python script `scripts/setup_10x_for_conga.py` for 10x datasets. For example:
 
 ```
-python conga/scripts/setup_10x_for_conga.py --filtered_contig_annotations_csvfile vdj_v1_hs_pbmc_t_filtered_contig_annotations.csv --organism human
+python conga/scripts/setup_10x_for_conga.py --filtered_contig_annotations_csvfile vdj_v1_hs_pbmc3_t_filtered_contig_annotations.csv --organism human
 ```
 
 2. **ANALYZE**: The `scripts/run_conga.py` script has an implementation of the main pipeline and can be run
 as follows:
 
 ```
-python conga/scripts/run_conga.py --graph_vs_graph --gex_data data/vdj_v1_hs_pbmc_5gex_filtered_gene_bc_matrices_h5.h5 --gex_data_type 10x_h5 --clones_file vdj_v1_hs_pbmc_t_filtered_contig_annotations_tcrdist_clones.tsv --organism human --outfile_prefix tmp_hs_pbmc
+python conga/scripts/run_conga.py --graph_vs_graph --gex_data data/vdj_v1_hs_pbmc3_5gex_filtered_gene_bc_matrices_h5.h5 --gex_data_type 10x_h5 --clones_file vdj_v1_hs_pbmc3_t_filtered_contig_annotations_tcrdist_clones.tsv --organism human --outfile_prefix tmp_hs_pbmc3
 ```
 
 3. **RE-ANALYZE**: Step 2 will generate a processed `.h5ad` file that contains all the gene expression
 and TCR sequence information along with the results of clustering and dimensionality reduction. It can then
 be much faster to perform subsequent re-analysis or downstream analysis by "restarting" from those files.
+Here we are using the `--all` command line flag which requests all the major analysis modes:
 
 ```
-python conga/scripts/run_conga.py --restart tmp_hs_pbmc_final.h5ad --graph_vs_tcr_features --graph_vs_gex_features --outfile_prefix tmp_hs_pbmc_restart
+python conga/scripts/run_conga.py --restart tmp_hs_pbmc3_final.h5ad --all --outfile_prefix tmp_hs_pbmc3_restart
 ```
 
 See the examples section below for more details.
@@ -60,29 +71,30 @@ We highly recommend using anaconda/miniconda for managing python environments. T
 `conga` manuscript were conducted with the following package versions:
 
 ```
-scanpy==1.4.3 anndata==0.6.18 umap==0.3.9 numpy==1.16.2 scipy==1.2.1 pandas==0.24.1 scikit-learn==0.20.2 statsmodels==0.9.0 python-igraph==0.7.1 louvain==0.6.1
+scanpy==1.4.3 anndata==0.6.18 umap-learn==0.3.9 numpy==1.16.2 scipy==1.2.1 pandas==0.24.1 scikit-learn==0.20.2 statsmodels==0.9.0 python-igraph==0.7.1 louvain==0.6.1
 ```
 
 which might possibly be installed with the following `conda` command:
 ```
-conda create -n conga_classic_env ipython python=3.6 scanpy=1.4.3 umap-learn=0.3.9
+conda create -n conga_classic_env ipython python=3.6 scanpy=1.4.3 umap-learn=0.3.9 louvain=0.6.1
 ```
 
 
 We've also been able to re-run everything, albeit with some numerical changes, with a current (2020-05-25) scanpy
 installation and these package versions:
 ```
-scanpy==1.5.1 anndata==0.7.3 umap==0.4.3 numpy==1.17.5 scipy==1.4.1 pandas==1.0.3 scikit-learn==0.23.1 statsmodels==0.11.1 python-igraph==0.8.2 louvain==0.6.1 leidenalg==0.8.0
+scanpy==1.5.1 anndata==0.7.3 umap-learn==0.4.3 numpy==1.17.5 scipy==1.4.1 pandas==1.0.3 scikit-learn==0.23.1 statsmodels==0.11.1 python-igraph==0.8.2 louvain==0.6.1 leidenalg==0.8.0
 ```
 
 Which was installed with the following `conda` commands (following the `scanpy` docs):
 ```
 conda create -n conga_new_env ipython python=3.6
-conda activate conga_new_env   (or source activate conga_new_env)
+conda activate conga_new_env   # or: "source activate conga_new_env" depending on your conda setup
 conda install seaborn scikit-learn statsmodels numba pytables
-conda install -c conda-forge python-igraph leidenalg
-conda install -c conda-forge louvain
+conda install -c conda-forge python-igraph leidenalg louvain
+conda install -c intel tbb # optional
 pip install scanpy
+pip install fastcluster # optional
 ```
 
 (And consider also adding `conda install -c conda-forge notebook` for Jupyter notebook stuff.)
@@ -92,7 +104,35 @@ clustering algorithm seems to give slightly 'better' results than the newer `lei
 ie finds a few more GEX/TCR associations, probably because there seem to be fewer, larger clusters.
 If the `louvain` package is installed `conga` will use that.
 
-# migrating Seurat data to CoNGA
+Next, clone the `conga` repository (type this command wherever you want the `conga/` directory to appear):
+```
+git clone https://github.com/phbradley/conga.git
+```
+
+*NEW* We recently added a C++ implementation of TCRdist to speed neighbor calculations on
+large datasets and to compute the background TCRdist distributions for the new
+'TCR clumping' analysis. This is not required by the core functionality
+described in the original manuscript, but we highly recommend that you compile
+the C++ TCRdist code using your C++ compiler.
+
+We've successfullly used `g++` from the GNU Compiler Collection (https://gcc.gnu.org/) to compile on
+Linux and MacOS, and from MinGw (http://www.mingw.org/) for Windows.
+
+Using `make` on Linux or MacOS. (You can edit `conga/tcrdist_cpp/Makefile` to
+point to a C++ compiler other than `g++`)
+```
+cd conga/tcrdist_cpp
+make
+```
+Or without `make` (for Windows)
+```
+cd conga/tcrdist_cpp
+g++ -O3 -std=c++11 -Wall -I ./include/ -o ./bin/find_neighbors ./src/find_neighbors.cc
+g++ -O3 -std=c++11 -Wall -I ./include/ -o ./bin/calc_distributions ./src/calc_distributions.cc
+g++ -O3 -std=c++11 -Wall -I ./include/ -o ./bin/find_paired_matches ./src/find_paired_matches.cc
+```
+
+# Migrating Seurat data to CoNGA
 We recommend using the write10XCounts function from the DropletUtils package for
 converting Seurat objects into 10x format for importing into CoNGA/scanpy.
 ```
@@ -105,6 +145,43 @@ write10xCounts(x = hs1@assays$RNA@counts, path = './hs1_mtx/')
 ```
 
 # Updates
+
+* 2021-01-21: (EXPERIMENTAL) New mode of analysis in which the paired TCR
+sequences in the analyzed dataset are matched to paired sequences in a literature-derived
+database compiled from VDJdb, McPAS, the large 10x dextramer dataset,
+the protein structure databank, and a few other studies. See the database
+[README](conga/data/new_paired_tcr_db_for_matching_nr_README.txt) for citation
+details and the
+[database itself](conga/data/new_paired_tcr_db_for_matching_nr.tsv).
+This mode of analysis is included in `scripts/run_conga.py --all` or with
+the `--match_to_tcr_database` flag. Or from within the `conga` package
+using the `conga.tcr_clumping.match_adata_tcrs_to_db_tcrs` function.
+You can also pass in a user-provided paired TCR sequence database for matching
+against using the
+`run_conga.py` command line flag `--tcr_database_tsvfile` or the second
+argument to the `conga.tcr_clumping.match_adata_tcrs_to_db_tcrs`
+function. The statistical significance of matches is evaluated using the
+same background `tcrdist` calculations that go into the 'TCR clumping'
+analysis described below (which incidentally means that this mode
+requires compilation of the C++ tcrdist executable as described in
+the installation section above).
+
+* 2020-12-31: (EXPERIMENTAL) New mode of analysis, TCR clumping, to detect
+clustered regions of TCR space. This mode will identify TCR clonotypes that have
+more TCRdist neighbors at specified distance thresholds in the analyzed dataset
+than would be expected by chance under
+a simple null model based on shuffling the observed alpha-beta and V-J pairings
+while (mostly) preserving V(D)J rearrangement statistics. Accessed through the
+`conga/scripts/run_conga.py` script with the flag `--tcr_clumping` or when
+using `--all` to run all major analyses. Also accessible in the python package
+via the `conga.tcr_clumping.assess_tcr_clumping` routine. Note that this
+analysis does not use the GEX information at all. Inspired by ALICE from Walczak
+and Mora and TCRnet from the VDJtools folks.
+
+* 2020-12-31: C++ implementation of TCRdist distance calculations for speed and
+to power the 'TCR clumping' analysis. Requires C++ compiler. Code is stored in
+`conga/tcrdist_cpp` and compiled as described above in the Installation section.
+
 * 2020-09-16: (EXPERIMENTAL) Added a preliminary implementation of the
 Hotspot autocorrelation algorithm developed by the Yosef lab, for finding informative features
 in multi-modal data (check out the [github repo](https://github.com/YosefLab/Hotspot)
@@ -142,14 +219,18 @@ still say TCR in a few places...
 # svg to png
 The `conga` image-making pipeline requires an svg to png conversion. There seem to be a variety of
 options for doing this, with the best choice being somewhat platform dependent. We've had good luck with
-ImageMagick `convert` (on linux) and Inkscape (on mac). The conversion is handled in the file
-`conga/convert_svg_to_png.py`, so you can modify that file if things are not working and you have
-a tool installed; `conga` may not be looking in the right place. Also if the fonts
+ImageMagick `convert` (on Linux, MacOS, and Windows) and Inkscape (on mac).
+
+On Mac, we recommend installing ImageMagick using Homebrew with:
+`brew install imagemagick`
+
+On Windows, we recommend the self-installing executable available from ImageMagick:
+(https://imagemagick.org/script/download.php)
+
+The conversion is handled in the file `conga/convert_svg_to_png.py`, so you can modify that file if things are
+not working and you have a tool installed; `conga` may not be looking in the right place. Also if the fonts
 in the TCR/BCR logos look bad you could try switching the MONOSPACE_FONT_FAMILY
 variable in that python file (see comments at the top of the file).
-
-If you are having trouble and are using anaconda/miniconda, you could try
-`conda install -c conda-forge imagemagick` in the relevant conda environment.
 
 # Examples
 Shell scripts for running `conga` on three publicly available 10X
@@ -161,6 +242,9 @@ key outputs. For details on the algorithm and additional details on the plots,
 refer to our [bioRxiv preprint](https://www.biorxiv.org/content/10.1101/2020.06.04.134536v1).
 Here we focus on images, but the results of the different analysis
 modes are also saved in a variety of tab-separated-values (`*.tsv`) files.
+You can download a [zip file](https://www.dropbox.com/s/r7rpsftbtxl89y5/conga_example_datasets_v1.zip?dl=0)
+containing all three datasets. Or access them individually from the 10x website
+at the locations given below.
 
 ## Human PBMC dataset
 
@@ -254,12 +338,12 @@ ie where each clonotype is connected to the nearest 10 percent of the dataset).
 The colors along the top of the matrix show the GEX cluster assignments of
 each clonotype. The two columns of colors along the left-hand side of the matrix
 show (left column) the P-value and (right column) the feature type (GEX vs TCR)
-of the feature corresponding to that row (P-values and feature types are also 
+of the feature corresponding to that row (P-values and feature types are also
 given in the row names along the right-hand side of the matrix). '[+N]' in the
 row name means that N additional highly-correlated features were filtered out;
 their names will be listed in the tiny blue text along the left-hand side of the
 figure, listed below the name of the representative feature. (Some of these images
-are big and very detailed-- downloading or opening in a separate tab and zooming 
+are big and very detailed-- downloading or opening in a separate tab and zooming
 in may be helpful).
 
 ![clustermap](_images/tcr_hs_pbmc_0.100_nbrs_combo_hotspot_features_vs_gex_clustermap_lessredundant.png)
@@ -352,3 +436,157 @@ value of 10 to zero (blue) with more significant scores trending toward red at
 a value of 1e-8:
 
 ![tcrdist_tree](_images/bcr_hs_melanoma_conga_score_lt_10.0_tcrdist_tree.png)
+
+# CoNGA data model: where stuff is stored
+
+After setup, the conga package stores data in various locations
+in the `scanpy` `AnnData` object. Below we assume that `adata` is
+the name of the AnnData object where the GEX and
+TCR data is stored (this is the naming
+convention followed in CoNGA).
+
+## The core stuff
+CoNGA functionality like graph-vs-graph and graph-vs-feature analyses will
+generally expect these to be set once the setup phase has completed. The
+CoNGA routines that fill these arrays are:
+* `conga.preprocess.read_data`: loads the GEX data into an `AnnData` object
+(here called `adata`); puts the TCR information into the `adata.obs` arrays;
+reads the TCRdist kernel principal components and stores them in `adata.obsm` under
+the key `X_pca_tcr`. Eliminates cells without paired TCR information.
+* `conga.preprocess.filter_and_scale`: sets up the `adata.raw` object, does
+some typical single-cell filtering and preprocessing.
+* `conga.preprocess.reduce_to_single_cell_per_clone`: reduces to a single
+cell per clonotype; fills the `adata.obs['clone_sizes']` array and
+potentially `adata.obsm[<batch_key>]` for one or more `<batch_key>`s if
+there is batch structure defined in the input data.
+* `conga.preprocess.cluster_and_tsne_and_umap`: Fills `adata.obsm['X_pca_gex']`,
+and the `adata.obs` arrays `X_gex_2d`, `X_tcr_2d`, `clusters_gex`,
+and `clusters_tcr`.
+
+### `adata.obs`
+The following 1-D arrays are stored in the `obs` array and can be accessed
+with expressions like `adata.obs['va']`
+
+* `va`: V gene names, alpha chain
+* `ja`: J gene names, alpha chain
+* `cdr3a`: CDR3 amino acid sequences, alpha chain
+* `cdr3a_nucseq`: CDR3 nucleotide sequences, alpha chain
+* `vb`: V gene names, beta chain
+* `jb`: J gene names, beta chain
+* `cdr3b`: CDR3 amino acid sequences, beta chain
+* `cdr3b_nucseq`: CDR3 nucleotide sequences, beta chain
+* `clusters_gex`: GEX cluster assignments, integers, range `[0, num_clusters)`
+* `clusters_tcr`: TCR cluster assignments, integers, range `[0, num_clusters)`
+* `clone_sizes`: The number of cells in each clonotype.
+
+
+### `adata.obsm`
+The following multidimensional arrays are stored in the `obsm` array after
+setup.
+
+* `X_pca_gex`: The GEX principal components. Used for neighbor-finding,
+UMAP projections, etc.
+* `X_pca_tcr`: The TCRdist kernel principal components. May be missing if
+we are using the 'exact TCRdist neighbors' mode, which is useful for really
+big datasets where the kernel PCA calculation takes forever.
+* `X_gex_2d`: The 2D landscape projection based on GEX (UMAP by default).
+* `X_tcr_2d`: The 2D landscape projection based on TCR (UMAP by default).
+
+### `adata.uns`
+These miscellaneous data are stashed in the `adata.uns` dictionary:
+
+* `organism`: A string indicating what type of TCR/BCR data is being analyzed.
+CoNGA currently supports the following choices:
+    - `human`: human alpha-beta TCRs
+    - `mouse`: mouse alpha-beta TCRs
+    - `human_gd`: human gamma-delta TCRs
+    - `mouse_gd`: mouse gamma-delta TCRs
+    - `human_ig`: human BCRs
+
+### `adata.raw`
+This is where the raw data on gene expression is expected to live.
+
+* `adata.raw.X` Sparse matrix with the gene expression values for each gene.
+These will have been normalized to sum to 10,000 and then `np.log1p`'ed (had the natural logarithm taken after adding 1).
+* `adata.raw.var_names` The gene names; should match the number of columns in
+`adata.raw.X`.
+
+### GEX and TCR neighbors
+Currently the neighborhood information is stored independently of the
+`adata` object, in a dictionary called `all_nbrs`. The keys of this
+dictionary are the neighborhood fractions aka `nbr_fracs`, floats that
+represent the size of the neighborhood as a fraction of the total number
+of clonotypes. The default `nbr_fracs` are `[0.01, 0.1]`. For each `nbr_frac`,
+`all_nbrs[nbr_frac] = [gex_nbrs, tcr_nbrs]` where `gex_nbrs` and `tcr_nbrs`
+are `numpy` arrays of shape `(num_clonotypes,num_nbrs)`, and
+`num_nbrs = int(nbr_frac*num_clonotypes)`. Note that a clonotype is not
+included in its own set of neighbors. Also note that the CoNGA neighbor
+information is distinct from neighbor information
+that `scanpy` uses for UMAP projection and clustering.
+CoNGA neighborhoods are larger than the neighborhoods typically used
+in clustering and dimensionality reduction.
+
+## Extras
+This might be results of calculations that are stored for easier access,
+or optional data that is present in certain circumstances
+(for example when there are batches present).
+It should be OK if any of these are missing.
+
+### `adata.obs`
+The following 1-D arrays are stored in the `obs` array and can be accessed
+with expressions like `adata.obs['va']`
+
+* `is_invariant`: Boolean array recording the presence of
+canonical invariant (MAIT or iNKT) TCR chains.
+* `nndists_tcr`: Nearest-neighbor distances based on TCR sequence.
+Gives an approximate measure of (inverse) TCR density.
+* `nndists_gex`: Nearest-neighbor distances based on GEX.
+Gives an approximate measure of (inverse) GEX density.
+* `conga_scores`: CoNGA scores for each clonotype.
+Filled after the graph-vs-graph analysis has been run.
+* `<batch_key>`: When there are multiple batches present in a dataset
+these can be tracked and visualized in many of the analysis
+and plotting routines.
+Here `<batch_key>` is the name of the batch/category (for example `'outcome'` or `'subject'` or `'timepoint'`).
+The entry in `adata.obs` for each batch key should contain integers in the range `[0,num_batch_classes)`.
+This information is stored in the `adata.obs` array *prior* to condensing to a single
+cell per clonotype, and in the `adata.obsm` array *after* condensing to a single cell per clonotype
+(since expanded clonotypes can span multiple batch assignments).
+See the FAQ entry on batches in CoNGA (coming soon).
+
+### `adata.obsm`
+The following multidimensional arrays are stored in the `obs` array and can be accessed
+with expressions like `adata.obsm[<tag>]`
+
+* `<batch_key>`: When there are multiple batches present in a dataset
+these can be tracked and visualized in many of the analysis
+and plotting routines.
+Here `<batch_key>` is the name of the batch/category (for example `'outcome'` or `'subject'` or `'timepoint'`).
+For each `<batch_key>`, the array stored in `adata.obsm` should have shape
+`(num_clonotypes,num_categories)` where `num_categories` is the number of possible
+batch assignments. For example if there are three timepoints then `num_categories` for the `'timepoint'` batch key would be 3.
+The `(i,j)` entry in the array will give the number of cells in clonotype `i` that were
+assigned to the batch assignment `j`.
+This array is filled automatically when we reduce to a single cell per clonotype,
+based on the information in the array `adata.obs[<batch_key>]` (see above).
+See the FAQ entry on batches in CoNGA (available soon).
+
+### `adata.uns`
+* `batch_keys`: A list of strings that gives the names of the different
+batch types/categories, if present (for example something like `['subject', 'outcome', 'timepoint']`.
+For each name in `adata.uns['batch_keys']` there should be
+an entry in the `adata.obs` array with that name (see above for description of that data).
+When we condense to a single cell per clonotype,
+we add an entry in the `adata.obsm` array with the same name, which contains the counts
+for each batch assignment summed over
+all the cells in each clonotype (so it's a 2D array and hence has to be stored in `obsm` not `obs`.
+
+### `adata.var`
+* `feature_types`: This array is used to detect and exclude
+antibody (site-seq) or other non-gene-expression
+features. If it's missing, then during setup CoNGA will assume that
+all the counts in the `adata.X` array are gene-expression features.
+The expected value for gene expression features in this
+array is the string `'Gene Expression'`. CoNGA will look for and use any column
+in the `adata.var` array whose name starts with
+`feature_types` (since sometimes they get renamed during concatenation).
