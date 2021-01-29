@@ -39,8 +39,8 @@ class TCR_Gene:
             assert self.cdrs == [ self.alseq[ x[0]-1 : x[1] ] for x in self.cdr_columns ]
 
 def trim_allele_to_gene( id ):
-    return id[: id.index('*') ] #will fail if id doesn't contain '*'
-
+    # return id[: id.index('*') ] #will fail if id doesn't contain '*'
+    return id
 db_file = os.path.dirname(os.path.realpath(__file__))+'/db/'+basic.db_file
 assert exists(db_file)
 

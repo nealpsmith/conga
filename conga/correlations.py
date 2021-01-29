@@ -272,7 +272,7 @@ def run_rank_genes_on_good_biclusters(
         clusters_gex,
         clusters_tcr,
         rank_method='wilcoxon',
-        rg_tag = 'test',
+        rg_tag = 'bicluster',
         neg_tag='none',
         min_count=5,
         key_added = 'rank_genes_good_biclusters'

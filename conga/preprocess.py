@@ -190,6 +190,10 @@ def read_dataset(
     stores the tcr-dist kPCA info in adata.obsm under the key 'X_pca_tcr'
     stores the tcr info in adata.obs under multiple keys (see store_tcrs_in_adata(...) function)
     '''
+    # Check the input
+    dtypes = ['h5ad', '10x_mtx', '10x_h5', 'loom']
+    if not gex_data_type in dtypes :
+        raise ValueError("gex_data_type should be one of {dtypes}".format(dtypes = dtypes)) 
 
     include_tcr_nucseq = True
 

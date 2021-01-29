@@ -91,10 +91,10 @@ def cd8_score_tcr_chain( ab, v, j, cdr3 ):
                                max( int(x) for x in all_scorevals['B']['cdr3_len'] ) ) }
 
     assert ab in 'AB'
-    if '*' in v:
-        v = v[:v.index('*')]
-    if '*' in j:
-        j = j[:j.index('*')]
+    if '-' in v:
+        v = v[:v.index('-')]
+    if '-' in j:
+        j = j[:j.index('-')]
     v_score = all_scorevals[ab]['gene'].get(v,0.0)
     j_score = all_scorevals[ab]['gene'].get(j,0.0)
     mn,mx = cdr3_len_ranges[ab]
@@ -136,7 +136,7 @@ def is_human_mait_alpha_chain(atcr):
              len(atcr[2]) == 12 )
 
 def is_mouse_mait_alpha_chain(atcr):
-    return ( atcr[0].startswith('TRAV1*') and atcr[1].startswith('TRAJ33') and len(atcr[2]) == 12 )
+    return ( atcr[0].startswith('TRAV1-') and atcr[1].startswith('TRAJ33') and len(atcr[2]) == 12 )
 
 def is_mouse_inkt_alpha_chain(atcr):
     return ( atcr[0].startswith('TRAV11') and atcr[1].startswith('TRAJ18') and len(atcr[2]) == 15 )
@@ -204,8 +204,12 @@ def alphadist_score_tcr( tcr ):
     global trav_list
     global traj_list
     va, ja = tcr[0][:2]
-    va = va[:va.index('*')]
-    ja = ja[:ja.index('*')]
+    # print(va)
+    # print(ja)
+    if "-" in va :
+        va = va[:va.index('-')]
+    if "-" in ja :
+        ja = ja[:ja.index('-')]
     if va in trav_list:
         va_dist = len(trav_list)-1 -trav_list.index(va)
     else:
