@@ -25,6 +25,9 @@ from . import plotting
 from .tcrdist.tcr_distances import TcrDistCalculator
 from .util import tcrdist_cpp_available
 
+# we also allow 'va' in place of 'va_gene' / 'ja' in place of 'ja_gene', etc:
+CLONES_FILE_REQUIRED_COLUMNS = 'clone_id va_gene ja_gene cdr3a cdr3a_nucseq vb_gene jb_gene cdr3b cdr3b_nucseq'.split()
+
 # silly hack
 all_sexlinked_genes = frozenset('XIST DDX3Y EIF1AY KDM5D LINC00278 NLGN4Y RPS4Y1 TTTY14 TTTY15 USP9Y UTY ZFY'.split())
 
@@ -61,9 +64,17 @@ def add_mait_info_to_adata_obs( adata, key_added = 'is_invariant' ):
 
 def normalize_and_log_the_raw_matrix(
         adata,
-        normalize_antibody_features_CLR=True, # centered log normalize (this is NEW!!!! was just log1p'ing before)
-        counts_per_cell_after = 1e4 ):
+        normalize_antibody_features_CLR=True, # centered log normalize
+        counts_per_cell_after = 1e4,
+):
     '''
+    The GEX features are normalized to sum to `counts_per_cell_after` then
+    log1p'ed
+
+    If present, antibody aka protein/citeseq/dextramer features will log1p'ed
+    and CLR log normalized (if `normalize_antibody_features_CLR` is True) or
+    just log1p'ed
+
     '''
     if check_if_raw_matrix_is_logged( adata ):
         print('normalize_and_log_the_raw_matrix:: matrix is already logged')
@@ -172,41 +183,6 @@ def retrieve_tcrs_from_adata(adata, include_subject_id_if_present=False):
 
     return tcrs
 
-def setup_X_igex( adata ):
-    ''' Side effect: will log1p-and-normalize the raw matrix if that's not already done
-    '''
-    # tmp hacking
-    all_genes_file = Path.joinpath( Path( util.path_to_data ) , 'igenes_all_v1.txt')
-    kir_genes = 'KIR2DL1 KIR2DL3 KIR2DL4 KIR3DL1 KIR3DL2 KIR3DL3 KIR3DX1'.split()
-    extra_genes = [ 'CD4','CD8A','CD8B','CCR7', 'SELL','CCL5','KLRF1','KLRG1','IKZF2','PDCD1','GNG4','MME',
-                    'ZNF683','KLRD1','NCR3','KIR3DL1','NCAM1','ITGAM','KLRC2','KLRC3', #'MME',
-                    'GNLY','IFNG', 'GZMH','GZMA','CCR6', 'TRAV1-2','KLRB1','ZBTB16', 'GATA3',
-                    'TRBC1','EPHB6','SLC4A10','DAD1','ITGB1', 'KLRC1','CD45RA_TotalSeqC','CD45RO_TotalSeqC',
-                    'ZNF683','KLRD1','NCR3','KIR3DL1','NCAM1','ITGAM','KLRC2','KLRC3','GNLY',
-                    'CCR7_TotalSeqC','CD3_TotalSeqC','IgG1_TotalSeqC','PD-1_TotalSeqC','CD5' ]
-
-    all_genes = sorted( set( [x[:-1] for x in open(all_genes_file,'r')] + extra_genes + kir_genes ) )
-
-    organism = 'human'
-    if 'organism' in adata.uns_keys():
-        organism = adata.uns['organism']
-
-    if 'mouse' in organism: # this is a temporary hack -- could actually load a mapping between mouse and human genes
-        all_genes = [x.capitalize() for x in all_genes]
-
-    for g in plotting.default_logo_genes[organism] + plotting.default_gex_header_genes[organism]:
-        if g not in all_genes:
-            all_genes.append(g)
-
-    normalize_and_log_the_raw_matrix(adata) # just in case
-    var_names = list( adata.raw.var_names )
-    good_genes = [ x for x in all_genes if x in var_names ]
-    print('found {} of {} good_genes in var_names  organism={}'.format(len(good_genes), len(all_genes), organism))
-    assert good_genes
-    indices = [ var_names.index(x) for x in good_genes ]
-    X_igex = adata.raw[:,indices].X.toarray()
-    return X_igex, good_genes
-
 
 def read_adata(
         gex_data, # filename
@@ -224,12 +200,14 @@ def read_adata(
 
     elif gex_data_type == '10x_h5':
         adata = sc.read_10x_h5( gex_data, gex_only=gex_only )
+        adata.var_names_make_unique()
 
     elif gex_data_type == 'loom':
         adata = sc.read_loom( gex_data )
 
     else:
-        print('unrecognized gex_data_type:', gex_data_type, "should be one of ['h5ad', '10x_mtx', '10x_h5', 'loom']")
+        print('unrecognized gex_data_type:', gex_data_type,
+              "should be one of ['h5ad', '10x_mtx', '10x_h5', 'loom']")
         exit()
 
     if adata.isview: # this is so weird
@@ -243,14 +221,19 @@ def read_dataset(
         make_var_names_unique = True,
         keep_cells_without_tcrs = False,
         kpca_file = None,
-        allow_missing_kpca_file = False,
+        allow_missing_kpca_file = False, # only relevant if clones_file!=None
         gex_only=True, #only applies to 10x-formatted data
         suffix_for_non_gene_features=None, #None or a string
+        save_stats=None,
 ):
     ''' returns adata
 
     stores the tcr-dist kPCA info in adata.obsm under the key 'X_pca_tcr'
     stores the tcr info in adata.obs under multiple keys (see store_tcrs_in_adata(...) function)
+
+    if clones_file is None, gex_data_type must be 'h5ad' and the tcr info
+      must already be in the AnnData object (ie adata) when we load it
+
     '''
     # Check the input
     dtypes = ['h5ad', '10x_mtx', '10x_h5', 'loom']
@@ -261,19 +244,43 @@ def read_dataset(
 
     adata = read_adata(gex_data, gex_data_type, gex_only=gex_only)
 
+    if save_stats is not None:
+        save_stats['num_cells_w_gex'] = adata.shape[0]
+        save_stats['num_features_start'] = adata.shape[1]
 
     if suffix_for_non_gene_features is not None:
         feature_types_colname = util.get_feature_types_varname( adata )
-        assert feature_types_colname, 'cant identify non-gene features, no feature_types data column'
+        assert feature_types_colname, \
+            'cant identify non-gene features, no feature_types data column'
 
-        ab_mask = np.array(adata.var[feature_types_colname] != util.GENE_EXPRESSION_FEATURE_TYPE)
-        print(f'adding {suffix_for_non_gene_features} to {np.sum(ab_mask)} non-GEX features: {adata.var_names[ab_mask]}')
-        newnames = [ x+suffix_for_non_gene_features if y else x for x,y in zip(adata.var_names, ab_mask)]
+        ab_mask = np.array(adata.var[feature_types_colname] !=
+                           util.GENE_EXPRESSION_FEATURE_TYPE)
+        print(f'adding {suffix_for_non_gene_features} to {np.sum(ab_mask)}'
+              f' non-GEX features: {adata.var_names[ab_mask]}')
+        newnames = [ x+suffix_for_non_gene_features if y else x
+                     for x,y in zip(adata.var_names, ab_mask)]
         adata.var.index = newnames
 
 
     if make_var_names_unique:
         adata.var_names_make_unique() # added
+
+    if clones_file is None:
+        # adata should already contain the tcr information
+        colnames = 'va ja cdr3a cdr3a_nucseq vb jb cdr3b cdr3b_nucseq'.split()
+        for colname in colnames:
+            if colname not in adata.obs_keys():
+                print('ERROR read_dataset: clones_file = None',
+                      'but adata doesnt already contain', colname)
+                sys.exit()
+        # what about 'X_pca_tcr' ie the kernel PCs??
+        # should we worry about those now?
+        if 'X_pca_tcr' not in adata.obsm_keys():
+            print('WARNING:: reading dataset without clones file',
+                  'kernel PCs will not be set ie X_pca_tcr array',
+                  'will be missing from adata.obsm!!!!!!!!!!!!!', sep='\n')
+        return adata ########################################## EARLY RETURN
+
 
     barcodes = set( adata.obs.index )
     print('total barcodes:',len(barcodes),adata.shape)
@@ -292,10 +299,25 @@ def read_dataset(
     clones_file_header = tmpdata.readline()
     tmpdata.close()
     #clones_file_header = popen('head -n1 '+clones_file).readlines()[0]
-    lines = pd.read_csv( clones_file,sep='\t')
+    clones_df = pd.read_csv(clones_file, sep='\t')
+    # allow use of either 'va' or 'va_gene' as column header
+    for vj in 'vj':
+        for ab in 'ab':
+            tag = f'{vj}{ab}_gene'
+            alt_tag = f'{vj}{ab}'
+            if tag not in clones_df.columns and alt_tag in clones_df.columns:
+                clones_df.rename(columns={alt_tag:tag}, inplace=True)
+
+    for colname in CLONES_FILE_REQUIRED_COLUMNS:
+        if colname not in clones_df.columns:
+            print('ERROR clones_file is missing required column:', colname)
+            print('Required columns:', CLONES_FILE_REQUIRED_COLUMNS)
+            print('clones_file:', clones_file)
+            sys.exit()
+
     id2tcr = {}
     tcr2id = {}
-    for l in lines.itertuples(index=False):
+    for l in clones_df.itertuples(index=False):
         if include_tcr_nucseq:
             atcr = ( l.va_gene, l.ja_gene, l.cdr3a, l.cdr3a_nucseq )
             btcr = ( l.vb_gene, l.jb_gene, l.cdr3b, l.cdr3b_nucseq )
@@ -359,7 +381,8 @@ def read_dataset(
     #adata = adata[mask,:]
     adata = adata[mask,:].copy()
     assert not adata.isview
-
+    if save_stats is not None:
+        save_stats['num_cells_w_tcr'] = adata.shape[0]
 
     if not missing_kpca_file: # stash the kPCA info in adata.obsm
         X_kpca = np.array( [ barcode2kpcs[x] for x in adata.obs.index ] )
@@ -388,6 +411,7 @@ def filter_normalize_and_hvg(
         also_exclude_TR_constant_region_genes = True, ## this is NEW and not the default for the old TCR analysis!!!!
         exclude_sexlinked = False,
         outfile_prefix_for_qc_plots = None,
+        normalize_antibody_features_CLR=True, # centered log normalize
 ):
     '''Filters cells and genes to find highly variable genes'''
 
@@ -467,15 +491,10 @@ def filter_normalize_and_hvg(
         print('num antibody features:', np.sum(mask))
         if np.sum(mask):
             assert not antibody # sanity check
-            oldshape = adata.shape
-            oldrawshape = adata.raw.shape
             adata = adata[:,~mask].copy()
-            newshape = adata.shape
-            newrawshape = adata.raw.shape
-            removed_at_end = ( np.sum( mask[:newshape[1]] )==0 )
+            removed_at_end = (np.sum(mask[:adata.shape[1]])==0)
             print('Removed {} antibody features from adata, using colname {}'\
-                  .format( np.sum(mask), feature_types_colname ), oldshape, oldrawshape, newshape, newrawshape,
-                  removed_at_end )
+                  .format(np.sum(mask), feature_types_colname ))
             assert removed_at_end # want to make this assumption somewhere else
 
     #normalize and log data
@@ -502,12 +521,13 @@ def filter_normalize_and_hvg(
         hvg_mask[is_sexlinked] = False
 
     print('total of', np.sum(hvg_mask), 'variable genes', adata.shape)
-    oldshape = adata.shape
-    oldrawshape = adata.raw.shape
     adata = adata[:, hvg_mask].copy()
-    newshape = adata.shape
-    newrawshape = adata.raw.shape
-    #print('after slice:', len(adata.var_names), oldshape, oldrawshape, newshape, newrawshape )
+
+    # new: normalize the raw matrix here; used to do this later
+    adata = normalize_and_log_the_raw_matrix(
+        adata,
+        normalize_antibody_features_CLR=normalize_antibody_features_CLR
+    )
 
     return adata
 
@@ -664,11 +684,16 @@ def filter_and_scale(
         n_genes= None,
         percent_mito= None,
         outfile_prefix_for_qc_plots = None,
+        normalize_antibody_features_CLR=True, # centered log normalize
 ):
     ## now process as before
     adata = filter_normalize_and_hvg(
         adata, min_genes=min_genes, n_genes=n_genes, percent_mito=percent_mito,
-        exclude_TR_genes= True, exclude_sexlinked=True, outfile_prefix_for_qc_plots=outfile_prefix_for_qc_plots)
+        exclude_TR_genes= True, exclude_sexlinked=True,
+        outfile_prefix_for_qc_plots=outfile_prefix_for_qc_plots,
+        normalize_antibody_features_CLR=normalize_antibody_features_CLR,
+    )
+
 
     ## should consider adding cell cycle here:
     sc.pp.regress_out(adata, ['n_counts','percent_mito'])
@@ -696,8 +721,6 @@ def reduce_to_single_cell_per_clone(
 
     stashes info in adata:
     obs: clone_sizes
-    obsm: X_igex
-    uns: X_igex_genes
     '''
 
     # compute pcs
@@ -721,10 +744,9 @@ def reduce_to_single_cell_per_clone(
 
     tcr2clone_id = { y:x for x,y in enumerate(tcrs) }
 
-    #
-    # get the interesting genes matrix before we subset
-    # this will normalize and log the raw array if not done!!
-    X_igex, good_genes = setup_X_igex(adata)
+    # this is not probably not necessary, e.g. if we already called
+    # filter_normalize_and_hvg
+    adata = normalize_and_log_the_raw_matrix(adata) # just in case
 
 
     if 'pmhc_var_names' in adata.uns_keys():
@@ -758,7 +780,6 @@ def reduce_to_single_cell_per_clone(
     gex_var = []
     batch_counts = []
     rep_cell_indices = [] # parallel
-    new_X_igex = []
 
     ## only used if average_clone_gex is True
     old_raw_X = adata.raw.X
@@ -800,22 +821,18 @@ def reduce_to_single_cell_per_clone(
             if clone_size == 1:
                 new_X_rows.append(old_raw_X[clone_cells[0],:])
             else:
-                new_X_rows.append(csr_matrix(old_raw_X[clone_cells,:].sum(axis=0)/clone_size))
+                new_X_rows.append(
+                    csr_matrix(old_raw_X[clone_cells,:].sum(axis=0)/clone_size))
                 adata.X[rep_cell_index,:] = adata.X[clone_cells,:].sum(axis=0)/clone_size
-        new_X_igex.append( np.sum( X_igex[clone_cells,:], axis=0 ) / clone_size )
         if pmhc_var_names:
             new_X_pmhc.append( np.sum( X_pmhc[clone_cells,:], axis=0 ) / clone_size )
 
     rep_cell_indices = np.array(rep_cell_indices)
-    new_X_igex = np.array(new_X_igex)
-    assert new_X_igex.shape == ( num_clones, len(good_genes))
 
     print(f'reduce from {adata.shape[0]} cells to {len(rep_cell_indices)} cells (one per clonotype)')
     adata = adata[ rep_cell_indices, : ].copy() ## seems like we need to copy here, something to do with adata 'views'
     adata.obs['clone_sizes'] = np.array( clone_sizes )
     adata.obs['gex_variation'] = np.sqrt(np.array( gex_var ))
-    adata.obsm['X_igex'] = new_X_igex
-    adata.uns['X_igex_genes'] = good_genes
 
     if average_clone_gex:
         print('vstacking new_X_rows...'); sys.stdout.flush()
@@ -828,7 +845,7 @@ def reduce_to_single_cell_per_clone(
 
 
 
-    if batch_keys:
+    if batch_keys is not None:
         for k in batch_keys:
             counts = np.array(clone_batch_counts[k])
             assert counts.shape == (num_clones, num_batch_key_choices[k])
@@ -842,8 +859,6 @@ def reduce_to_single_cell_per_clone(
 
     tcrs_redo = retrieve_tcrs_from_adata(adata, include_subject_id_if_present=True)
     assert tcrs_redo == tcrs # sanity check
-
-    adata = normalize_and_log_the_raw_matrix( adata ) # prob not necessary; already done for X_igex ?
 
     if use_existing_pca_obsm_tag is None:
         # delete the temporary pcs we computed just to pick rep cells
@@ -919,9 +934,7 @@ def filter_cells_by_ribo_norm(adata):
     return adata
 
 
-def setup_tcr_groups( adata ):
-    tcrs = retrieve_tcrs_from_adata(adata, include_subject_id_if_present=True)
-
+def setup_tcr_groups_for_tcrs( tcrs ):
     atcrs = sorted( set( x[0] for x in tcrs ) )
     btcrs = sorted( set( x[1] for x in tcrs ) )
 
@@ -933,6 +946,9 @@ def setup_tcr_groups( adata ):
 
     return agroups, bgroups
 
+def setup_tcr_groups( adata ):
+    return setup_tcr_groups_for_tcrs(
+        retrieve_tcrs_from_adata(adata, include_subject_id_if_present=True))
 
 def _calc_nndists( D, nbrs ):
     batch_size, num_nbrs = nbrs.shape
@@ -967,6 +983,7 @@ def calc_nbrs_batched(
         nbr_frac_for_nndists = None,
         target_N_for_batching = 8192,
         use_exact_tcrdist_nbrs = False,
+        tmpfile_prefix = None, # only used if use_exact_tcrdist_nbrs and CPP
 ):
     ''' returns dict mapping from nbr_frac to [nbrs_gex, nbrs_tcr]
 
@@ -1029,15 +1046,13 @@ def calc_nbrs_batched(
                 full_nbrs = all_nbrs[nbr_frac][itag]
                 full_nbrs[b_start:b_stop,:] = np.argpartition(
                     D, num_neighbors-1 )[:,:num_neighbors]
-                print(f'full_nbrs_id {nbr_frac} {id(full_nbrs)}')
+                #print(f'full_nbrs_id {nbr_frac} {id(full_nbrs)}')
                 #assert nbrs.shape == (D.shape[0], num_neighbors)
                 #all_nbrs[nbr_frac][itag].append(nbrs)
 
                 if also_calc_nndists and nbr_frac == nbr_frac_for_nndists:
-                    print('calculate nndists:', tag, nbr_frac)
                     nndists[itag].append(
                         _calc_nndists(D, full_nbrs[b_start:b_stop,:]))
-                    print('DONE calculating nndists:', nbr_frac)
 
 
     # for nbr_frac in nbr_fracs:
@@ -1045,7 +1060,9 @@ def calc_nbrs_batched(
     #     all_nbrs[nbr_frac] = [ np.vstack(nbrslist_gex), None if obsm_tag_tcr is None else np.vstack(nbrslist_tcr) ]
 
     if use_exact_tcrdist_nbrs:
-        tcr_nbrs, tcr_nndists = calculate_tcrdist_nbrs(adata, nbr_fracs, nbr_frac_for_nndists)
+        tcr_nbrs, tcr_nndists = calculate_tcrdist_nbrs(
+            adata, nbr_fracs, nbr_frac_for_nndists,
+            tmpfile_prefix=tmpfile_prefix)
         for nbr_frac in nbr_fracs:
             nbrs_gex,_ = all_nbrs[nbr_frac]
             all_nbrs[nbr_frac] = [nbrs_gex, tcr_nbrs[nbr_frac]]
@@ -1053,7 +1070,9 @@ def calc_nbrs_batched(
 
     if also_calc_nndists:
         nndists_gex = np.hstack(nndists[0])
-        nndists_tcr = nndists[1] if use_exact_tcrdist_nbrs else None if obsm_tag_tcr is None else np.hstack(nndists[1])
+        nndists_tcr = nndists[1] if use_exact_tcrdist_nbrs else \
+                      None if obsm_tag_tcr is None else \
+                      np.hstack(nndists[1])
 
         return all_nbrs, nndists_gex, nndists_tcr
     else:
@@ -1069,6 +1088,7 @@ def calc_nbrs(
         nbr_frac_for_nndists = None,
         target_N_for_batching = 8192,
         use_exact_tcrdist_nbrs = False,
+        tmpfile_prefix = None, # only used if use_exact_tcrdist_nbrs and CPP
 ):
     ''' returns dict mapping from nbr_frac to [nbrs_gex, nbrs_tcr]
 
@@ -1078,7 +1098,8 @@ def calc_nbrs(
         return calc_nbrs_batched(
             adata, nbr_fracs, obsm_tag_gex, obsm_tag_tcr, also_calc_nndists,
             nbr_frac_for_nndists, target_N_for_batching,
-            use_exact_tcrdist_nbrs=use_exact_tcrdist_nbrs)
+            use_exact_tcrdist_nbrs=use_exact_tcrdist_nbrs,
+            tmpfile_prefix=tmpfile_prefix)
 
     if also_calc_nndists:
         assert nbr_frac_for_nndists in nbr_fracs
@@ -1117,7 +1138,9 @@ def calc_nbrs(
 
 
     if use_exact_tcrdist_nbrs:
-        tcr_nbrs, tcr_nndists = calculate_tcrdist_nbrs(adata, nbr_fracs, nbr_frac_for_nndists)
+        tcr_nbrs, tcr_nndists = calculate_tcrdist_nbrs(
+            adata, nbr_fracs, nbr_frac_for_nndists,
+            tmpfile_prefix=tmpfile_prefix)
         for nbr_frac in nbr_fracs:
             nbrs_gex,_ = all_nbrs[nbr_frac]
             all_nbrs[nbr_frac] = [nbrs_gex, tcr_nbrs[nbr_frac]]
@@ -1133,6 +1156,7 @@ def calculate_tcrdist_nbrs(
         adata,
         nbr_fracs,
         nbr_frac_for_nndists = None, # if not None, calculate nndists at this nbr fraction
+        tmpfile_prefix = None,
 ):
     ''' returns all_nbrs, nndists
 
@@ -1145,7 +1169,9 @@ def calculate_tcrdist_nbrs(
     nbrs exclude self and any clones in same atcr group or btcr group
     '''
     if util.tcrdist_cpp_available():
-        return calculate_tcrdist_nbrs_cpp(adata, nbr_fracs, nbr_frac_for_nndists)
+        return calculate_tcrdist_nbrs_cpp(
+            adata, nbr_fracs, nbr_frac_for_nndists,
+            tmpfile_prefix=tmpfile_prefix)
     else:
         return calculate_tcrdist_nbrs_python(adata, nbr_fracs, nbr_frac_for_nndists)
 
@@ -1212,7 +1238,7 @@ def calculate_tcrdist_nbrs_cpp(
         adata,
         nbr_fracs,
         nbr_frac_for_nndists = None,
-        tmpfile_prefix = None
+        tmpfile_prefix = None,
 ):
     ''' returns all_nbrs, nndists
 
@@ -1392,15 +1418,22 @@ def make_tcrdist_kernel_pcs_file_from_clones_file(
         output_distfile = None,
         force_Dmax = None,
         force_tcrdist_cpp = False,
+        tcrs = None,
+        return_pcs = False, # default is to write to a file
 ):
-    if outfile is None: # this is the name expected by read_dataset above (with n_components_in==50)
+    if (not return_pcs) and outfile is None:
+        # this is the name expected by read_dataset above
+        #  (with n_components_in==50)
         outfile = '{}_AB.dist_{}_kpcs'.format(clones_file[:-4], n_components_in)
 
-    df = pd.read_csv(clones_file, sep='\t')
+    if tcrs is None:
+        df = pd.read_csv(clones_file, sep='\t')
 
-    # in conga we usually also have cdr3_nucseq but we don't need it for tcrdist; we also don't need the jgene but hey
-    tcrs = [ ( ( l.va_gene, l.ja_gene, l.cdr3a ), ( l.vb_gene, l.jb_gene, l.cdr3b ) ) for l in df.itertuples() ]
-    ids = [ l.clone_id for l in df.itertuples() ]
+        # in conga we usually also have cdr3_nucseq but we don't need it
+        #  for tcrdist; we also don't need the jgene but hey
+        tcrs = [((l.va_gene, l.ja_gene, l.cdr3a),
+                 (l.vb_gene, l.jb_gene, l.cdr3b)) for l in df.itertuples()]
+        ids = [l.clone_id for l in df.itertuples()]
 
 
     if input_distfile is None: ## tcr distances
@@ -1410,19 +1443,22 @@ def make_tcrdist_kernel_pcs_file_from_clones_file(
             print('Using C++ TCRdist calculator')
             D = calc_tcrdist_matrix_cpp(tcrs, organism, outfile)
         else:
-            print('Using Python TCRdist calculator. Consider compiling C++ calculator for faster perfomance.')
+            print('Using Python TCRdist calculator. Consider compiling',
+                  'C++ calculator for faster perfomance.')
             tcrdist_calculator = TcrDistCalculator(organism)
-            D = np.array( [ tcrdist_calculator(x,y) for x in tcrs for y in tcrs ] ).reshape( (len(tcrs), len(tcrs)) )
+            D = np.array([tcrdist_calculator(x,y) for x in tcrs for y in tcrs])\
+                  .reshape((len(tcrs), len(tcrs)))
     else:
         print(f'reload tcrdist distance matrix for {len(tcrs)} clonotypes')
         D = np.loadtxt(input_distfile)
 
     if output_distfile is not None:
-        np.savetxt( distfile, D.astype(float), fmt='%.1f')
+        np.savetxt( output_distfile, D.astype(float), fmt='%.1f')
 
     n_components = min( n_components_in, D.shape[0] )
 
-    print(f'running KernelPCA with {kernel} kernel distance matrix shape= {D.shape} D.max()= {D.max()} force_Dmax= {force_Dmax}')
+    print(f'running KernelPCA with {kernel} kernel distance matrix',
+          f'shape= {D.shape} D.max()= {D.max()} force_Dmax= {force_Dmax}')
 
     pca = KernelPCA(kernel='precomputed', n_components=n_components)
 
@@ -1433,7 +1469,8 @@ def make_tcrdist_kernel_pcs_file_from_clones_file(
     elif kernel == 'gaussian':
         gram = np.exp(-0.5 * (D/gaussian_kernel_sdev)**2 )
     else:
-        print('conga.preprocess.make_tcrdist_kernel_pcs_file_from_clones_file:: unrecognized kernel:', kernel)
+        print('conga.preprocess.make_tcrdist_kernel_pcs_file_from_clones_file:',
+              'unrecognized kernel:', kernel)
         sys.exit(1)
 
     xy = pca.fit_transform(gram)
@@ -1442,16 +1479,21 @@ def make_tcrdist_kernel_pcs_file_from_clones_file(
         for ii in range(n_components):
             print( 'eigenvalue: {:3d} {:.3f}'.format( ii, pca.lambdas_[ii]))
 
-    # this is the kpca_file that conga.preprocess.read_dataset is expecting:
-    #kpca_file = clones_file[:-4]+'_AB.dist_50_kpcs'
-    print( 'writing TCRdist kernel PCs to outfile:', outfile)
-    out = open(outfile,'w')
+    if return_pcs:
+        return xy ######################### NOTE EARLY RETURN
+    else:
 
-    for ii in range(D.shape[0]):
-        out.write('pc_comps: {} {}\n'\
-                  .format( ids[ii], ' '.join( '{:.6f}'.format(xy[ii,j]) for j in range(n_components) ) ) )
-    out.close()
-    return
+        # this is the kpca_file that conga.preprocess.read_dataset is expecting:
+        #kpca_file = clones_file[:-4]+'_AB.dist_50_kpcs'
+        print( 'writing TCRdist kernel PCs to outfile:', outfile)
+        out = open(outfile,'w')
+
+        for ii in range(D.shape[0]):
+            out.write('pc_comps: {} {}\n'\
+                      .format(ids[ii], ' '.join('{:.6f}'.format(xy[ii,j])
+                                                for j in range(n_components))))
+        out.close()
+        return
 
 
 def condense_clones_file_and_barcode_mapping_file_by_tcrdist(
@@ -1712,6 +1754,12 @@ def calc_tcrdist_nbrs_umap_clusters_cpp(
 
     del adata.obsm['X_pca'] # delete the fake pcas
     del adata.obsm['X_umap'] # delete the extra umap copy
+
+    # cleanup the tmpfiles
+    for filename in [knn_indices_filename,
+                     knn_distances_filename,
+                     tcrs_filename]:
+        os.remove(filename)
 
 def calc_tcrdist_matrix_cpp(
         tcrs,
@@ -2122,4 +2170,39 @@ def retrieve_nbr_info_from_adata(
         assert all_nbrs[nbr_frac][1] is not None
 
     return all_nbrs
+
+# def setup_X_igex( adata ):
+#     ''' Side effect: will log1p-and-normalize the raw matrix if that's not already done
+#     '''
+#     # tmp hacking
+#     all_genes_file = Path.joinpath( Path( util.path_to_data ) , 'igenes_all_v1.txt')
+#     kir_genes = 'KIR2DL1 KIR2DL3 KIR2DL4 KIR3DL1 KIR3DL2 KIR3DL3 KIR3DX1'.split()
+#     extra_genes = [ 'CD4','CD8A','CD8B','CCR7', 'SELL','CCL5','KLRF1','KLRG1','IKZF2','PDCD1','GNG4','MME',
+#                     'ZNF683','KLRD1','NCR3','KIR3DL1','NCAM1','ITGAM','KLRC2','KLRC3', #'MME',
+#                     'GNLY','IFNG', 'GZMH','GZMA','CCR6', 'TRAV1-2','KLRB1','ZBTB16', 'GATA3',
+#                     'TRBC1','EPHB6','SLC4A10','DAD1','ITGB1', 'KLRC1','CD45RA_TotalSeqC','CD45RO_TotalSeqC',
+#                     'ZNF683','KLRD1','NCR3','KIR3DL1','NCAM1','ITGAM','KLRC2','KLRC3','GNLY',
+#                     'CCR7_TotalSeqC','CD3_TotalSeqC','IgG1_TotalSeqC','PD-1_TotalSeqC','CD5' ]
+
+#     all_genes = sorted( set( [x[:-1] for x in open(all_genes_file,'r')] + extra_genes + kir_genes ) )
+
+#     organism = 'human'
+#     if 'organism' in adata.uns_keys():
+#         organism = adata.uns['organism']
+
+#     if 'mouse' in organism: # this is a temporary hack -- could actually load a mapping between mouse and human genes
+#         all_genes = [x.capitalize() for x in all_genes]
+
+#     for g in plotting.default_logo_genes[organism] + plotting.default_gex_header_genes[organism]:
+#         if g not in all_genes:
+#             all_genes.append(g)
+
+#     normalize_and_log_the_raw_matrix(adata) # just in case
+#     var_names = list( adata.raw.var_names )
+#     good_genes = [ x for x in all_genes if x in var_names ]
+#     print('found {} of {} good_genes in adata.raw.var_names  organism={}'.format(len(good_genes), len(all_genes), organism))
+#     assert good_genes
+#     indices = [ var_names.index(x) for x in good_genes ]
+#     X_igex = adata.raw[:,indices].X.toarray()
+#     return X_igex, good_genes
 

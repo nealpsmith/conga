@@ -13,6 +13,7 @@ import numpy as np
 # from scipy.spatial.distance import squareform, cdist
 # from scipy.sparse import issparse#, csr_matrix
 from scipy.stats import poisson
+from statsmodels.stats.multitest import multipletests
 # from anndata import AnnData
 import sys
 import os
@@ -72,10 +73,12 @@ def estimate_background_tcrdist_distributions(
     tcrs_file = str(tmpfile_prefix) + '_tcrs.tsv'
 
     pd.DataFrame({'va'   :[x[0] for x in background_alpha_chains],
-                  'cdr3a':[x[2] for x in background_alpha_chains]}).to_csv(achains_file, sep='\t', index=False)
+                  'cdr3a':[x[2] for x in background_alpha_chains]}).to_csv(
+                      achains_file, sep='\t', index=False)
 
     pd.DataFrame({'vb'   :[x[0] for x in background_beta_chains ],
-                  'cdr3b':[x[2] for x in background_beta_chains ]}).to_csv(bchains_file, sep='\t', index=False)
+                  'cdr3b':[x[2] for x in background_beta_chains ]}).to_csv(
+                      bchains_file, sep='\t', index=False)
 
     pd.DataFrame({'va':[x[0][0] for x in tcrs], 'cdr3a':[x[0][2] for x in tcrs],
                   'vb':[x[1][0] for x in tcrs], 'cdr3b':[x[1][2] for x in tcrs]})\
@@ -84,16 +87,20 @@ def estimate_background_tcrdist_distributions(
 
     # compute distributions vs background chains
     if os.name == 'posix':
-        exe = Path.joinpath( Path(util.path_to_tcrdist_cpp_bin) , 'calc_distributions')
+        exe = Path.joinpath( Path(util.path_to_tcrdist_cpp_bin) ,
+                             'calc_distributions')
     else:
-        exe = Path.joinpath( Path(util.path_to_tcrdist_cpp_bin) , 'calc_distributions.exe')
+        exe = Path.joinpath( Path(util.path_to_tcrdist_cpp_bin) ,
+                             'calc_distributions.exe')
 
     outfile = str(tmpfile_prefix) + '_dists.tsv'
 
-    db_filename = Path.joinpath( Path(util.path_to_tcrdist_cpp_db) , 'tcrdist_info_{}.txt'.format( organism))
+    db_filename = Path.joinpath( Path(util.path_to_tcrdist_cpp_db) ,
+                                 'tcrdist_info_{}.txt'.format( organism))
 
     cmd = '{} -f {} -m {} -d {} -a {} -b {} -o {}'\
-    .format(exe, tcrs_file, max_dist, db_filename, achains_file, bchains_file, outfile)
+          .format(exe, tcrs_file, max_dist, db_filename,
+                  achains_file, bchains_file, outfile)
 
     util.run_command(cmd, verbose=True)
 
@@ -112,15 +119,17 @@ def estimate_background_tcrdist_distributions(
 
     return tcrdist_freqs
 
-
-def assess_tcr_clumping(
-        adata,
-        outfile_prefix,
+# not to be confused with assess_tcr_clumping which takes in an adata
+# and is basically a wrapper around this guy
+def find_tcr_clumping(
+        tcrs,
+        organism,
+        tmpfile_prefix = 'tmp',
         radii = [24, 48, 72, 96],
-        num_random_samples = 50000, # higher numbers are slower but allow more significant pvalues for extreme clumping
+        num_random_samples = 50000, # higher ==> more sensitive, slower
         pvalue_threshold = 1.0,
         verbose=True,
-        also_find_clumps_within_gex_clusters=False,
+        clusters_gex=None, # if passed, will look for clumps within clusters
 ):
     ''' Returns a pandas dataframe with the following columns:
     - clone_index
@@ -135,60 +144,72 @@ def assess_tcr_clumping(
 
     '''
     if not util.tcrdist_cpp_available():
-        print('conga.tcr_clumping.assess_tcr_clumping:: need to compile the C++ tcrdist executables')
+        print('conga.tcr_clumping.find_tcr_clumping::',
+              'need to compile the C++ tcrdist executables')
         exit(1)
 
-    if also_find_clumps_within_gex_clusters:
-        clusters_gex = np.array(adata.obs['clusters_gex'])
-
-    organism = adata.uns['organism']
-    num_clones = adata.shape[0]
+    num_clones = len(tcrs)
 
     radii = [int(x+0.1) for x in radii] #ensure integers
 
-    outprefix = outfile_prefix + '_tcr_clumping'
+    outprefix = f'{tmpfile_prefix}_{random.random()}_tcr_clumping'
+    tmpfiles = []
 
-    tcrs = preprocess.retrieve_tcrs_from_adata(adata)
-
+    # this will optimize V/J alleles to fit the cdr3_nucseqs better
+    # in case 10x didn't give us the alleles
     bg_freqs = estimate_background_tcrdist_distributions(
-        adata.uns['organism'], tcrs, max(radii), num_random_samples=num_random_samples, tmpfile_prefix=outprefix)
+        organism, tcrs, max(radii),
+        num_random_samples=num_random_samples, tmpfile_prefix=outprefix)
 
     tcrs_file = outprefix +'_tcrs.tsv'
-    adata.obs['va cdr3a vb cdr3b'.split()].to_csv(tcrs_file, sep='\t', index=False)
+    pd.DataFrame({
+        'va'   : [x[0][0] for x in tcrs],
+        'cdr3a': [x[0][2] for x in tcrs],
+        'vb'   : [x[1][0] for x in tcrs],
+        'cdr3b': [x[1][2] for x in tcrs],
+    }).to_csv(tcrs_file, sep='\t', index=False)
+    tmpfiles.append(tcrs_file)
 
-
-    # find neighbors in fg tcrs up to max(radii) #######################################
+    # find neighbors in fg tcrs up to max(radii) ############################
 
     if os.name == 'posix':
-        exe = Path.joinpath( Path(util.path_to_tcrdist_cpp_bin) , 'find_neighbors')
+        exe = Path.joinpath(
+            Path(util.path_to_tcrdist_cpp_bin) , 'find_neighbors')
     else:
-        exe = Path.joinpath( Path(util.path_to_tcrdist_cpp_bin) , 'find_neighbors.exe')
+        exe = Path.joinpath(
+            Path(util.path_to_tcrdist_cpp_bin) , 'find_neighbors.exe')
 
-    agroups, bgroups = preprocess.setup_tcr_groups(adata)
+    agroups, bgroups = preprocess.setup_tcr_groups_for_tcrs(tcrs)
     agroups_filename = outprefix+'_agroups.txt'
     bgroups_filename = outprefix+'_bgroups.txt'
     np.savetxt(agroups_filename, agroups, fmt='%d')
     np.savetxt(bgroups_filename, bgroups, fmt='%d')
+    tmpfiles.extend([agroups_filename, bgroups_filename])
 
-    db_filename = Path.joinpath( Path(util.path_to_tcrdist_cpp_db), f'tcrdist_info_{organism}.txt')
+    db_filename = Path.joinpath(
+        Path(util.path_to_tcrdist_cpp_db), f'tcrdist_info_{organism}.txt')
 
     tcrdist_threshold = max(radii)
 
     cmd = '{} -f {} -t {} -d {} -o {} -a {} -b {}'\
-    .format(exe, tcrs_file, tcrdist_threshold, db_filename, outprefix, agroups_filename, bgroups_filename)
+          .format(exe, tcrs_file, tcrdist_threshold, db_filename, outprefix,
+                  agroups_filename, bgroups_filename)
 
     util.run_command(cmd, verbose=True)
 
-    nbr_indices_filename = outprefix + '_nbr{}_indices.txt'.format( tcrdist_threshold)
-    nbr_distances_filename = outprefix + '_nbr{}_distances.txt'.format( tcrdist_threshold)
+    nbr_indices_filename = f'{outprefix}_nbr{tcrdist_threshold}_indices.txt'
+    nbr_distances_filename = f'{outprefix}_nbr{tcrdist_threshold}_distances.txt'
+    tmpfiles.extend([nbr_indices_filename, nbr_distances_filename])
 
     if not exists(nbr_indices_filename) or not exists(nbr_distances_filename):
-        print('find_neighbors failed:', exists(nbr_indices_filename), exists(nbr_distances_filename))
+        print('find_neighbors failed:', exists(nbr_indices_filename),
+              exists(nbr_distances_filename))
         exit(1)
 
     all_nbrs = []
     all_distances = []
-    for line1, line2 in zip(open(nbr_indices_filename,'r'), open(nbr_distances_filename,'r')):
+    for line1, line2 in zip(open(nbr_indices_filename,'r'),
+                            open(nbr_distances_filename,'r')):
         l1 = line1.split()
         l2 = line2.split()
         assert len(l1) == len(l2)
@@ -197,86 +218,120 @@ def assess_tcr_clumping(
         all_distances.append([int(x) for x in l2])
     assert len(all_nbrs) == num_clones
 
-    clone_sizes = adata.obs['clone_sizes']
+    # we were printing this out in verbose mode...
+    #clone_sizes = adata.obs['clone_sizes']
 
-    # use poisson to find nbrhoods with more tcrs than expected; have to handle agroups/bgroups
+    # use poisson to find nbrhoods with more tcrs than expected;
+    #  have to handle agroups/bgroups
     dfl = []
 
     is_clumped = np.full((num_clones,), False)
 
     n_bg_pairs = num_random_samples * num_random_samples
 
+    all_raw_pvalues = np.full((num_clones, len(radii)), 1.0)
+
     for ii in range(num_clones):
         ii_freqs = bg_freqs[ii]
         ii_dists = all_distances[ii]
-        for radius in radii:
+        for irad, radius in enumerate(radii):
             num_nbrs = np.sum(x<=radius for x in ii_dists)
-            max_nbrs = np.sum( (agroups!=agroups[ii]) & (bgroups!=bgroups[ii]))
-            if num_nbrs:
-                # adjust for number of tests
+            if num_nbrs<1:
+                continue # NOTE: OK since wont have intra-cluster nbrs either
+            max_nbrs = np.sum((agroups!=agroups[ii]) & (bgroups!=bgroups[ii]))
+            # adjust for number of tests
+            mu = max_nbrs * ii_freqs[radius]
+            pval = poisson.sf(num_nbrs-1, mu)
+            all_raw_pvalues[ii, irad] = pval
+            pval *= len(radii) * num_clones # simple multiple test correction
+            if pval <= pvalue_threshold:
+                is_clumped[ii] = True
+                # count might just be pseudocount
+                raw_count = ii_freqs[radius]*n_bg_pairs
+                if verbose:
+                    atcr_str = ' '.join(tcrs[ii][0][:3])
+                    btcr_str = ' '.join(tcrs[ii][1][:3])
+                    print(f'tcr_nbrs_global: {num_nbrs:2d} {mu:9.6f}',
+                          f'radius: {radius:2d} pval: {pval:9.1e}',
+                          f'{raw_count:9.1f} tcr: {atcr_str} {btcr_str}')
+
+                dfl.append( OrderedDict(
+                    clump_type='global',
+                    clone_index=ii,
+                    nbr_radius=radius,
+                    pvalue_adj=pval,
+                    num_nbrs=num_nbrs,
+                    expected_num_nbrs=mu,
+                    raw_count=raw_count,
+                    va   =tcrs[ii][0][0],
+                    ja   =tcrs[ii][0][1],
+                    cdr3a=tcrs[ii][0][2],
+                    vb   =tcrs[ii][1][0],
+                    jb   =tcrs[ii][1][1],
+                    cdr3b=tcrs[ii][1][2],
+                ))
+            if clusters_gex is not None:
+                # look for clumping within the GEX cluster containing ii
+                ii_nbrs = all_nbrs[ii]
+                ii_cluster = clusters_gex[ii]
+                ii_cluster_mask = (clusters_gex==ii_cluster)
+                num_nbrs = np.sum((x<=radius and
+                                   clusters_gex[y]==ii_cluster)
+                                  for x,y in zip(ii_dists, ii_nbrs))
+                if num_nbrs<1:
+                    continue ## NOTE-- continue
+                max_nbrs = np.sum((agroups!=agroups[ii]) &
+                                  (bgroups!=bgroups[ii]) &
+                                  ii_cluster_mask)
                 mu = max_nbrs * ii_freqs[radius]
-                pval = len(radii) * num_clones * poisson.sf( num_nbrs-1, mu )
-                if pval< pvalue_threshold:
+                pval = (len(radii) * num_clones *
+                        poisson.sf(num_nbrs-1, mu ))
+                if pval <= pvalue_threshold:
                     is_clumped[ii] = True
-                    raw_count = ii_freqs[radius]*n_bg_pairs # if count was 0, will be pseudocount
+                    # if count was 0, will be pseudocount
+                    raw_count = ii_freqs[radius]*n_bg_pairs
                     if verbose:
-                        print('tcr_nbrs_global: {:2d} {:9.6f} radius: {:2d} pval: {:9.1e} {:9.1f} tcr: {:3d} {} {}'\
-                              .format( num_nbrs, mu, radius, pval, raw_count, clone_sizes[ii],
-                                       ' '.join(tcrs[ii][0][:3]), ' '.join(tcrs[ii][1][:3])))
-                    dfl.append( OrderedDict(clump_type='global',
-                                            clone_index=ii,
-                                            nbr_radius=radius,
-                                            pvalue_adj=pval,
-                                            num_nbrs=num_nbrs,
-                                            expected_num_nbrs=mu,
-                                            raw_count=raw_count,
-                                            va   =tcrs[ii][0][0],
-                                            ja   =tcrs[ii][0][1],
-                                            cdr3a=tcrs[ii][0][2],
-                                            vb   =tcrs[ii][1][0],
-                                            jb   =tcrs[ii][1][1],
-                                            cdr3b=tcrs[ii][1][2],
+                        atcr_str = ' '.join(tcrs[ii][0][:3])
+                        btcr_str = ' '.join(tcrs[ii][1][:3])
+                        print(f'tcr_nbrs_intra: {num_nbrs:2d} {mu:9.6f}',
+                              f'radius: {radius:2d} pval: {pval:9.1e}',
+                              f'{raw_count:9.1f} tcr: {atcr_str} {btcr_str}')
+                    dfl.append( OrderedDict(
+                        clump_type='intra_gex_cluster',
+                        clone_index=ii,
+                        nbr_radius=radius,
+                        pvalue_adj=pval,
+                        num_nbrs=num_nbrs,
+                        expected_num_nbrs=mu,
+                        raw_count=raw_count,
+                        va   =tcrs[ii][0][0],
+                        ja   =tcrs[ii][0][1],
+                        cdr3a=tcrs[ii][0][2],
+                        vb   =tcrs[ii][1][0],
+                        jb   =tcrs[ii][1][1],
+                        cdr3b=tcrs[ii][1][2],
                     ))
-                if also_find_clumps_within_gex_clusters:
-                    ii_nbrs = all_nbrs[ii]
-                    ii_cluster = clusters_gex[ii]
-                    ii_cluster_mask = (clusters_gex==ii_cluster)
-                    num_nbrs = np.sum( (x<=radius and clusters_gex[y]==ii_cluster) for x,y in zip(ii_dists, ii_nbrs))
-                    if num_nbrs:
-                        max_nbrs = np.sum( (agroups!=agroups[ii]) & (bgroups!=bgroups[ii]) & ii_cluster_mask)
-                        mu = max_nbrs * ii_freqs[radius]
-                        pval = len(radii) * num_clones * poisson.sf( num_nbrs-1, mu )
-                        if pval< pvalue_threshold:
-                            is_clumped[ii] = True
-                            raw_count = ii_freqs[radius]*n_bg_pairs # if count was 0, will be pseudocount
-                            if verbose:
-                                print('tcr_nbrs_intra: {:2d} {:9.6f} radius: {:2d} pval: {:9.1e} {:9.1f} tcr: {:3d} {} {}'\
-                                      .format( num_nbrs, mu, radius, pval, raw_count, clone_sizes[ii],
-                                               ' '.join(tcrs[ii][0][:3]), ' '.join(tcrs[ii][1][:3])))
-                            dfl.append( OrderedDict(clump_type='intra_gex_cluster',
-                                                    clone_index=ii,
-                                                    nbr_radius=radius,
-                                                    pvalue_adj=pval,
-                                                    num_nbrs=num_nbrs,
-                                                    expected_num_nbrs=mu,
-                                                    raw_count=raw_count,
-                                                    va   =tcrs[ii][0][0],
-                                                    ja   =tcrs[ii][0][1],
-                                                    cdr3a=tcrs[ii][0][2],
-                                                    vb   =tcrs[ii][1][0],
-                                                    jb   =tcrs[ii][1][1],
-                                                    cdr3b=tcrs[ii][1][2],
-                            ))
+
     results_df = pd.DataFrame(dfl)
     if results_df.shape[0] == 0:
         return results_df
+
+    # compute FDR values in addition to the simple adjusted pvalues
+    _, fdr_values, _, _ = multipletests(
+        all_raw_pvalues.reshape(-1), alpha=0.05, method='fdr_bh')
+    fdr_values = fdr_values.reshape((num_clones, len(radii))).min(axis=1)
+    # right now we don't assign fdr values for intra-gex cluster clumping
+    fdr_column = [fdr_values[x.clone_index] if x.clump_type=='global'
+                  else np.nan for x in results_df.itertuples()]
+    results_df['clonotype_fdr_value'] = fdr_column
 
     # identify groups of related hits?
     all_clumped_nbrs = {}
     for l in results_df.itertuples():
         ii = l.clone_index
         radius = l.nbr_radius
-        clumped_nbrs = set(x for x,y in zip(all_nbrs[ii], all_distances[ii]) if y<= radius and is_clumped[x])
+        clumped_nbrs = set(x for x,y in zip(all_nbrs[ii], all_distances[ii])
+                           if y<= radius and is_clumped[x])
         clumped_nbrs.add(ii)
         if ii in all_clumped_nbrs:
             all_clumped_nbrs[ii] = all_clumped_nbrs[ii] | clumped_nbrs
@@ -301,12 +356,14 @@ def assess_tcr_clumping(
         updated = False
         for ii in clumped_inds:
             nbr = all_smallest_nbr[ii]
-            new_nbr = min(nbr, np.min([all_smallest_nbr[x] for x in all_clumped_nbrs[ii]]))
+            new_nbr = min(nbr, np.min([all_smallest_nbr[x]
+                                       for x in all_clumped_nbrs[ii]]))
             if nbr != new_nbr:
                 all_smallest_nbr[ii] = new_nbr
                 updated = True
         if not updated:
             break
+
     # define clusters, choose cluster centers
     clusters = np.array([0]*num_clones) # 0 if not clumped
 
@@ -320,22 +377,73 @@ def assess_tcr_clumping(
 
     for ii, nbrs in all_clumped_nbrs.items():
         for nbr in nbrs:
-            assert clusters[ii] == clusters[nbr] # confirm single-linkage clusters
+            # confirm single-linkage clusters
+            assert clusters[ii] == clusters[nbr]
 
     assert not np.any(clusters[is_clumped]==0)
     assert np.all(clusters[~is_clumped]==0)
 
-    results_df['clumping_group'] = [ clusters[x.clone_index] for x in results_df.itertuples()]
+    results_df['clumping_group'] = [ clusters[x.clone_index]
+                                     for x in results_df.itertuples()]
+
+    for tmpfile in tmpfiles:
+        if exists(tmpfile):
+            os.remove(tmpfile)
 
     return results_df
 
 
+
+def assess_tcr_clumping(
+        adata,
+        also_find_clumps_within_gex_clusters = False,
+        **kwargs,
+        # these are the possible kwargs: see find_tcr_clumping above
+        #tmpfile_prefix = 'tmp'
+        #radii = [24, 48, 72, 96],
+        #num_random_samples = 50000,
+        #pvalue_threshold = 1.0,
+        #verbose=True,
+):
+    ''' This is a wrapper around find_tcr_clumping that takes an AnnData
+
+    Returns a pandas dataframe with the following columns:
+    - clone_index
+    - nbr_radius
+    - pvalue_adj
+    - num_nbrs
+    - expected_num_nbrs
+    - raw_count
+    - va, ja, cdr3a, vb, jb, cdr3b (ie, the 6 tcr cols for clone_index clone)
+    - clumping_group: clonotypes within each other's significant nbr_radii are linked
+    - clump_type: string, either 'global' or 'intra_gex_cluster' (latter only if also_find_clumps_within_gex_clusters=T)
+
+    Wrapper around find_tcr_clumping; here we take adata and unpack the info
+
+    '''
+    tcrs = preprocess.retrieve_tcrs_from_adata(adata)
+    if also_find_clumps_within_gex_clusters:
+        clusters_gex = np.array(adata.obs['clusters_gex'])
+    else:
+        clusters_gex = None
+
+    organism = adata.uns['organism']
+
+    return find_tcr_clumping(
+        tcrs,
+        organism,
+        clusters_gex=clusters_gex,
+        **kwargs
+    )
+
 def tcrs_from_dataframe_helper(df, add_j_and_nucseq=False):
     if add_j_and_nucseq:
         return [ ( (x.va, x.ja, x.cdr3a, x.cdr3a_nucseq),
-                   (x.vb, x.jb, x.cdr3b, x.cdr3b_nucseq) ) for x in df.itertuples() ]
+                   (x.vb, x.jb, x.cdr3b, x.cdr3b_nucseq) )
+                 for x in df.itertuples() ]
     else:
-        return [ ( (x.va, None, x.cdr3a), (x.vb, None, x.cdr3b) ) for x in df.itertuples() ]
+        return [ ( (x.va, None, x.cdr3a), (x.vb, None, x.cdr3b) )
+                 for x in df.itertuples() ]
 
 def find_significant_tcrdist_matches(
         query_tcrs_df,
@@ -388,8 +496,8 @@ def find_significant_tcrdist_matches(
     db_tcrs = tcrs_from_dataframe_helper(db_tcrs_df)
     background_tcrs = tcrs_from_dataframe_helper(background_tcrs_df, add_j_and_nucseq=True)
 
-    pvalue_adjustment = len(query_tcrs) * len(db_tcrs) # multiply by this to account for multiple tests
-    print('pvalue_adjustment:', pvalue_adjustment, len(query_tcrs), len(db_tcrs))
+    num_comparisons = len(query_tcrs) * len(db_tcrs)
+    print('num_comparisons:', num_comparisons, len(query_tcrs), len(db_tcrs))
 
     if fixup_allele_assignments_in_background_tcrs_df:
         background_tcrs = tcr_sampler.find_alternate_alleles_for_tcrs(
@@ -404,7 +512,7 @@ def find_significant_tcrdist_matches(
         tcrs_for_background_generation= background_tcrs)
     assert bg_freqs.shape == (len(query_tcrs), max_dist+1)
 
-    adjusted_bg_freqs = pvalue_adjustment * bg_freqs
+    adjusted_bg_freqs = num_comparisons * bg_freqs
 
     could_match = np.any( adjusted_bg_freqs<= adjusted_pvalue_threshold, axis=0)
     assert could_match.shape == (max_dist+1,)
@@ -413,13 +521,16 @@ def find_significant_tcrdist_matches(
     while could_match[max_dist_for_matching] and max_dist_for_matching<max_dist:
         max_dist_for_matching += 1
 
-    print(f'find_significant_tcrdist_matches:: max_dist: {max_dist} max_dist_for_matching: {max_dist_for_matching}')
+    print(f'find_significant_tcrdist_matches:: max_dist: {max_dist}',
+          f'max_dist_for_matching: {max_dist_for_matching}')
 
     # now run C++ matching code
     query_tcrs_file = tmpfile_prefix+'temp_query_tcrs.tsv'
     db_tcrs_file = tmpfile_prefix+'temp_db_tcrs.tsv'
-    query_tcrs_df['va cdr3a vb cdr3b'.split()].to_csv(query_tcrs_file, sep='\t', index=False)
-    db_tcrs_df['va cdr3a vb cdr3b'.split()].to_csv(db_tcrs_file, sep='\t', index=False)
+    query_tcrs_df['va cdr3a vb cdr3b'.split()].to_csv(query_tcrs_file, sep='\t',
+                                                      index=False)
+    db_tcrs_df['va cdr3a vb cdr3b'.split()].to_csv(db_tcrs_file, sep='\t',
+                                                   index=False)
 
     if os.name == 'posix':
         exe = Path.joinpath( Path(util.path_to_tcrdist_cpp_bin) , 'find_paired_matches')
@@ -442,11 +553,22 @@ def find_significant_tcrdist_matches(
 
     df = pd.read_csv(outfilename, sep='\t')
 
+    num_matches = df.shape[0]
+    raw_pvalues = [bg_freqs[x.index1][x.tcrdist] for x in df.itertuples()]
+    raw_pvalues_argsort = np.argsort(raw_pvalues)
+    raw_pvalues_sorted = np.concatenate(
+        [np.sort(raw_pvalues), np.full((num_comparisons - num_matches,), 1.0)])
+    assert raw_pvalues_sorted.shape[0] == num_comparisons #BIG
+    # the alpha setting here does not matter for method='fdr_bh'
+    _, fdr_values_sorted, _, _ = multipletests(
+        raw_pvalues_sorted, alpha=0.05, is_sorted=True, method='fdr_bh')
+    fdr_values = fdr_values_sorted[np.argsort(raw_pvalues_argsort)]
+
     dfl = []
-    for l in df.itertuples():
+    for l, fdr_value in zip(df.itertuples(), fdr_values):
         i = l.index1
         j = l.index2
-        pvalue_adj = pvalue_adjustment * bg_freqs[i][l.tcrdist]
+        pvalue_adj = num_comparisons * bg_freqs[i][l.tcrdist]
         if pvalue_adj > adjusted_pvalue_threshold:
             continue
         query_row = query_tcrs_df.iloc[i]
@@ -455,6 +577,7 @@ def find_significant_tcrdist_matches(
         assert db_row.cdr3b == l.cdr3b2 # ditto
         D = OrderedDict(tcrdist= l.tcrdist,
                         pvalue_adj=pvalue_adj,
+                        fdr_value=fdr_value, # Benjamini-Hochberg
                         query_index= i,
                         db_index= j,
                         va= query_row.va,
@@ -554,3 +677,68 @@ def match_adata_tcrs_to_db_tcrs(
 
     return results
 
+def strict_single_chain_match_adata_tcrs_to_db_tcrs(
+        adata,
+        db_tcrs_tsvfile=None,
+):
+    ''' Find CDR3a and CDR3b matches between adata tcrs and tcrs in db_tcrs_tsvfile
+    based on strictly matching amino acid sequences only
+
+    returns a list containing two DataFrames; 0 is alpha chain hits, 1 is beta chain hits.
+    DataFrames contain a columns with the UMI barcodes, GEX clusters, and TCR clusters of matching clonotypes
+
+    db_tcrs_tsvfile has at a minimum the columns: cdr3a and cdr3b
+
+    '''
+
+    if db_tcrs_tsvfile is None:
+        if adata.uns['organism'] == 'human':
+            db_tcrs_tsvfile = Path.joinpath(util.path_to_data, 'human_tcr_db_for_matching.tsv')
+        elif adata.uns['organism'] == 'mouse':
+            db_tcrs_tsvfile = Path.joinpath(util.path_to_data, 'mouse_tcr_db_for_matching.tsv')
+        print('tcr_clumping.strict_single_chain_match_adata_tcrs_to_db_tcrs: Matching to default literature TCR database; for more info see conga/data/human_and_mouse_tcr_db_for_matching_README.txt')
+
+    print('Matching to CDR3a and CDR3b sequences in', db_tcrs_tsvfile)
+
+    query_tcrs_df = adata.obs['va ja cdr3a vb jb cdr3b'.split()].copy()
+    db_tcrs_df = pd.read_csv(db_tcrs_tsvfile, sep='\t')
+
+    # possibly swap legacy column names.
+    if 'va' not in db_tcrs_df.columns and 'va_gene' in db_tcrs_df.columns:
+        db_tcrs_df['va'] = db_tcrs_df['va_gene']
+    if 'vb' not in db_tcrs_df.columns and 'vb_gene' in db_tcrs_df.columns:
+        db_tcrs_df['vb'] = db_tcrs_df['vb_gene']
+
+    # generate a list of df with database CDR3a or CDR3b matching to adata.obs
+    matched_dfs = []
+    chains = ('cdr3a', 'cdr3b')
+    for i in range(len(chains)):
+
+        chain = chains[i]
+
+        matched_dfs.append( db_tcrs_df[ db_tcrs_df[chain].isin(query_tcrs_df[chain]) ].copy() )
+
+        matched_dfs[i] = matched_dfs[i].rename(columns = {'Unnamed: 0': 'db_index'})
+
+        if matched_dfs[i].empty:
+            print(f'No {chain} matches detected')
+        else:
+            clones = []
+            gex_clusters = []
+            tcr_clusters = []
+
+            for (idx, row) in matched_dfs[i].iterrows():
+
+                clone_bc = adata.obs.index[adata.obs[chain] == row.loc[chain] ].to_list()
+                clone_gex = adata.obs.clusters_gex[adata.obs[chain] == row.loc[chain] ].astype(str).unique().tolist()
+                clone_tcr = adata.obs.clusters_tcr[adata.obs[chain] == row.loc[chain] ].astype(str).unique().tolist()
+
+                clones.append( ",".join(clone_bc) )
+                gex_clusters.append( ",".join(clone_gex) )
+                tcr_clusters.append( ",".join(clone_tcr) )
+
+            matched_dfs[i][f'{chain}_match_UMI'] = clones
+            matched_dfs[i][f'{chain}_match_gex_clusters'] = gex_clusters
+            matched_dfs[i][f'{chain}_match_tcr_clusters'] = tcr_clusters
+
+    return matched_dfs
