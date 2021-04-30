@@ -80,29 +80,34 @@ top of the [google colab jupyter notebook](colab_conga_pipeline.ipynb)
 are the necessary installation commands from within a notebook environment.
 
 ## Overview
-
-1. Install the wonderful `scanpy` python package for single-cell analysis
-([docs](https://scanpy.readthedocs.io/en/stable/installation.html)). For
-example, with `pip`:
+1. clone the github repo :
 ```
-pip3 install scanpy[leiden]
+git clone https://github.com/phbradley/conga.git
 ```
 
-2. Download the CoNGA github repository and (optional but recommended) compile the
-C++ TCRdist implementation; for example with `git` and `make`:
+2. Go into the github repo directory and install with pip.  Installing this way wil ensure dependencies (ex. `scanpy`) are also installed
+
 ```
-git clone https://github.com/phbradley/conga.git && cd conga/tcrdist_cpp && make
+cd conga
+pip install -e .
 ```
 
-3. Make sure you have a tool that can convert `.svg` files to `.png` files, like
+3. compile the C++ TCRdist implementation
+```
+cd tcrdist_cpp
+make
+``` 
+
+4. Make sure you have a tool that can convert `.svg` files to `.png` files, like
 inkscape, imagemagick convert, rsvg-convert, cairosvg (see below for details if
 you don't already have one).
 
-**NOTE** we recognize that this is really lame, but right now you can't do
-`import conga` within a python script or notebook without first adding the install
-location to your python path (e.g., `sys.path.append('/path/to/github-repos/conga/')`.
-Running the scripts in the `conga/scripts/` folder from the command line does not
-require this. We hope to smooth this out in the near future.
+
+Now you should be able to import pegasus seamlessly in a notebook :
+```
+import conga
+```
+
 
 ## Details
 

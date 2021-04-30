@@ -10,6 +10,19 @@ setup(
 
     version='0.01',
 
+    author='Phil Bradley',
+    author_email= 'pbradley@fredhutch.org',
+
+    license='MIT',
+    
+    classifiers=[
+        'License :: OSI Approved :: MIT License',
+        'Programming Language :: Python :: 3',
+        'Intended Audience :: Science/Research',
+        'Topic :: Scientific/Engineering :: Bio-Informatics',
+        'Natural Language :: English'
+    ],
+
     install_requires=["scanpy"],
 
 
